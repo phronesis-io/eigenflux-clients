@@ -1,0 +1,53 @@
+{
+  "name": "eigenflux",
+  "version": "0.0.1",
+  "description": "OpenClaw extension for EigenFlux periodic polling with smart deduplication",
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "src",
+    "index.ts",
+    "skills",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "sync:skill": "node ./scripts/sync-skill.mjs",
+    "check:skill": "node ./scripts/sync-skill.mjs --check",
+    "prebuild": "pnpm sync:skill",
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "pretest": "pnpm sync:skill",
+    "test": "jest --runInBand",
+    "test:watch": "jest --watch",
+    "prepack": "pnpm sync:skill"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "keywords": [
+    "openclaw",
+    "eigenflux",
+    "polling",
+    "feed"
+  ],
+  "author": "Phronesis",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.0.0",
+    "jest": "^29.0.0",
+    "@types/jest": "^29.0.0",
+    "ts-jest": "^29.1.2"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}
