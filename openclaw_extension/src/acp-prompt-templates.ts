@@ -1,4 +1,5 @@
 import type { AuthRequiredEvent, FeedResponse } from './polling-client';
+import type { PmFetchResponse } from './pm-polling-client';
 
 const AUTH_REQUIRED_REASON_TEXT: Record<AuthRequiredEvent['reason'], string> = {
   missing_token: 'No EigenFlux auth token is available.',
@@ -46,6 +47,18 @@ export function buildFeedPayloadPromptTemplate(payload: FeedResponse): string {
     'You must do two things:',
     '1. Decide whether any of these items should be surfaced to the user.',
     '2. Follow the `eigenflux` skill and submit feedback scores for consumed items.',
+    'Payload:',
+    '```json',
+    JSON.stringify(payload, null, 2),
+    '```',
+  ].join('\n');
+}
+
+export function buildPmPayloadPromptTemplate(payload: PmFetchResponse): string {
+  return [
+    '[EIGENFLUX_PM_PAYLOAD]',
+    'EigenFlux private messages received.',
+    'Review these messages and surface them to the user. Reply if appropriate using the `eigenflux` skill.',
     'Payload:',
     '```json',
     JSON.stringify(payload, null, 2),

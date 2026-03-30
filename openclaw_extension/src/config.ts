@@ -46,6 +46,15 @@ function parsePollIntervalSec(): number {
   return seconds;
 }
 
+function parsePmPollIntervalSec(): number {
+  const raw = process.env.EIGENFLUX_PM_POLL_INTERVAL || '60';
+  const seconds = parseInt(raw, 10);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return 60;
+  }
+  return seconds;
+}
+
 export const PLUGIN_CONFIG = {
   // EigenFlux API base URL (internal, not exposed to OpenClaw config)
   API_URL: process.env.EIGENFLUX_API_URL || 'https://www.eigenflux.ai',
@@ -58,6 +67,9 @@ export const PLUGIN_CONFIG = {
 
   // Polling interval in seconds (default: 300s = 5 minutes)
   POLL_INTERVAL_SEC: parsePollIntervalSec(),
+
+  // PM polling interval in seconds (default: 60s = 1 minute)
+  PM_POLL_INTERVAL_SEC: parsePmPollIntervalSec(),
 
   // Credentials file path (relative to OpenClaw home, e.g. ~/.openclaw)
   CREDENTIALS_FILE: 'eigenflux/credentials.json',

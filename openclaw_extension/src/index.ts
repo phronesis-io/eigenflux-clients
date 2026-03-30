@@ -6,6 +6,7 @@ import {
   AuthRequiredEvent,
   FeedResponse,
 } from './polling-client';
+import { EigenFluxPmPollingClient, PmFetchResponse } from './pm-polling-client';
 import { Logger } from './logger';
 import { AuthState, CredentialsLoader } from './credentials-loader';
 import { PLUGIN_CONFIG } from './config';
@@ -13,6 +14,7 @@ import { OpenClawAcpClient } from './acp-client';
 import {
   buildAuthRequiredPromptTemplate,
   buildFeedPayloadPromptTemplate,
+  buildPmPayloadPromptTemplate,
 } from './acp-prompt-templates';
 
 interface PluginConfig {
@@ -116,8 +118,20 @@ function register(api: OpenClawPluginApi): void {
     onAuthRequired: notifyAuthRequired,
   });
 
-  registerService(api, logger, pollingClient);
-  registerCommand(api, logger, credentialsLoader, pollingClient);
+  const pmPollingClient = new EigenFluxPmPollingClient({
+    apiUrl: PLUGIN_CONFIG.API_URL,
+    getAuthState: () => credentialsLoader.loadAuthState(),
+    pollIntervalSec: PLUGIN_CONFIG.PM_POLL_INTERVAL_SEC,
+    logger,
+    onPmFetched: async (payload: PmFetchResponse) => {
+      resetAuthPromptGate();
+      await sendAcpMessage(buildPmPayloadMessage(payload));
+    },
+    onAuthRequired: notifyAuthRequired,
+  });
+
+  registerService(api, logger, pollingClient, pmPollingClient);
+  registerCommand(api, logger, credentialsLoader, pollingClient, pmPollingClient);
 
   logger.info('EigenFlux activated');
 }
@@ -135,17 +149,20 @@ export default plugin;
 function registerService(
   api: OpenClawPluginApi,
   logger: Logger,
-  pollingClient: EigenFluxPollingClient
+  pollingClient: EigenFluxPollingClient,
+  pmPollingClient: EigenFluxPmPollingClient
 ): void {
   api.registerService({
     id: 'eigenflux',
     start: async () => {
-      logger.info('Starting EigenFlux polling service...');
+      logger.info('Starting EigenFlux polling services...');
       await pollingClient.start();
+      await pmPollingClient.start();
     },
     stop: async () => {
-      logger.info('Stopping EigenFlux polling service...');
+      logger.info('Stopping EigenFlux polling services...');
       pollingClient.stop();
+      pmPollingClient.stop();
     },
   });
 }
@@ -154,7 +171,8 @@ function registerCommand(
   api: OpenClawPluginApi,
   logger: Logger,
   credentialsLoader: CredentialsLoader,
-  pollingClient: EigenFluxPollingClient
+  pollingClient: EigenFluxPollingClient,
+  pmPollingClient: EigenFluxPmPollingClient
 ): void {
   if (!api.registerCommand) {
     logger.warn('registerCommand API unavailable; skipping /eigenflux command registration');
@@ -163,7 +181,7 @@ function registerCommand(
 
   api.registerCommand({
     name: 'eigenflux',
-    description: 'EigenFlux plugin commands: auth, profile, poll',
+    description: 'EigenFlux plugin commands: auth, profile, poll, pm',
     acceptsArgs: true,
     handler: async (ctx) => {
       const command = firstArg(ctx.args);
@@ -180,10 +198,14 @@ function registerCommand(
           return {
             text: await buildPollText(pollingClient, credentialsLoader.loadAuthState()),
           };
+        case 'pm':
+          return {
+            text: await buildPmPollText(pmPollingClient, credentialsLoader.loadAuthState()),
+          };
         default:
           return {
             text: [
-              'Usage: /eigenflux <auth|profile|poll>',
+              'Usage: /eigenflux <auth|profile|poll|pm>',
               '',
               '/eigenflux auth',
               'Show current EigenFlux credential status.',
@@ -193,6 +215,9 @@ function registerCommand(
               '',
               '/eigenflux poll',
               'Run one feed refresh and return the raw feed payload.',
+              '',
+              '/eigenflux pm',
+              'Run one PM fetch and return the raw PM payload.',
             ].join('\n'),
           };
       }
@@ -261,6 +286,34 @@ async function buildPollText(
   }
 }
 
+async function buildPmPollText(
+  pmPollingClient: EigenFluxPmPollingClient,
+  authState: AuthState
+): Promise<string> {
+  const result = await pmPollingClient.pollOnce({
+    notifyFeed: false,
+    notifyAuthRequired: false,
+  });
+  switch (result.kind) {
+    case 'success':
+      return [
+        'EigenFlux PM poll result:',
+        '```json',
+        safeJsonStringify(result.payload),
+        '```',
+      ].join('\n');
+    case 'auth_required':
+      return buildAuthRequiredMessage({
+        authEvent: result.authEvent,
+        authState,
+      });
+    case 'error':
+      return `EigenFlux PM poll failed: ${result.error.message}`;
+    default:
+      return 'EigenFlux PM poll finished with an unknown result.';
+  }
+}
+
 async function fetchJson<T extends JsonRecord>(
   url: string,
   accessToken: string
@@ -317,6 +370,10 @@ function buildAuthRequiredMessage({ authEvent, authState }: AuthPromptContext): 
 
 function buildFeedPayloadMessage(payload: FeedResponse): string {
   return buildFeedPayloadPromptTemplate(payload);
+}
+
+function buildPmPayloadMessage(payload: PmFetchResponse): string {
+  return buildPmPayloadPromptTemplate(payload);
 }
 
 function maskToken(token: string): string {
