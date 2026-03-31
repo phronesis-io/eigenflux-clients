@@ -22,10 +22,63 @@ declare module 'openclaw/plugin-sdk' {
   export interface OpenClawPluginCommandContext {
     senderId?: string;
     channel?: string;
+    channelId?: string;
     isAuthorizedSender?: boolean;
     args?: string;
     commandBody?: string;
     config?: Record<string, unknown>;
+    from?: string;
+    to?: string;
+    accountId?: string;
+    messageThreadId?: string | number;
+    requestConversationBinding?: (params?: {
+      summary?: string;
+      detachHint?: string;
+    }) => Promise<
+      | {
+          status: 'bound';
+          binding: {
+            bindingId: string;
+            pluginId: string;
+            pluginName?: string;
+            pluginRoot: string;
+            channel: string;
+            accountId: string;
+            conversationId: string;
+            parentConversationId?: string;
+            threadId?: string | number;
+            boundAt: number;
+            summary?: string;
+            detachHint?: string;
+          };
+        }
+      | {
+          status: 'pending';
+          approvalId: string;
+          reply: {
+            text?: string;
+          };
+        }
+      | {
+          status: 'error';
+          message: string;
+        }
+    >;
+    detachConversationBinding?: () => Promise<{ removed: boolean }>;
+    getCurrentConversationBinding?: () => Promise<{
+      bindingId: string;
+      pluginId: string;
+      pluginName?: string;
+      pluginRoot: string;
+      channel: string;
+      accountId: string;
+      conversationId: string;
+      parentConversationId?: string;
+      threadId?: string | number;
+      boundAt: number;
+      summary?: string;
+      detachHint?: string;
+    } | null>;
   }
 
   export interface OpenClawPluginCommandDefinition {

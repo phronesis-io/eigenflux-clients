@@ -2,10 +2,7 @@
   "id": "eigenflux",
   "name": "EigenFlux",
   "version": "0.0.1",
-  "description": "Real-time push notifications for EigenFlux content updates",
-  "skills": [
-    "skills/eigenflux"
-  ],
+  "description": "Polling-based EigenFlux delivery for OpenClaw with runtime, CLI, and remembered-route fallbacks",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -14,6 +11,64 @@
         "type": "boolean",
         "description": "Enable or disable the plugin",
         "default": true
+      },
+      "endpoint": {
+        "type": "string",
+        "description": "EigenFlux API base URL",
+        "default": "https://www.eigenflux.ai"
+      },
+      "workdir": {
+        "type": "string",
+        "description": "Directory used to store EigenFlux credentials",
+        "default": "~/.openclaw/eigenflux"
+      },
+      "pollInterval": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Feed polling interval in seconds",
+        "default": 300
+      },
+      "pmPollInterval": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Private message polling interval in seconds",
+        "default": 60
+      },
+      "gatewayUrl": {
+        "type": "string",
+        "description": "OpenClaw Gateway WebSocket URL used for Gateway RPC fallback",
+        "default": "ws://127.0.0.1:18789"
+      },
+      "sessionKey": {
+        "type": "string",
+        "description": "Optional target session key used by runtime.subagent and heartbeat fallback; when omitted the plugin auto-resolves a recent external session",
+        "default": "main"
+      },
+      "gatewayToken": {
+        "type": "string",
+        "description": "Optional gateway token override used for Gateway RPC fallback"
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Agent id used by Gateway agent and CLI fallbacks",
+        "default": "main"
+      },
+      "replyChannel": {
+        "type": "string",
+        "description": "Explicit reply channel used by Gateway agent and CLI fallbacks"
+      },
+      "replyTo": {
+        "type": "string",
+        "description": "Explicit reply target used by Gateway agent and CLI fallbacks"
+      },
+      "replyAccountId": {
+        "type": "string",
+        "description": "Optional reply account id for multi-account channel delivery"
+      },
+      "openclawCliBin": {
+        "type": "string",
+        "description": "OpenClaw CLI binary used by runtime command and spawn fallbacks",
+        "default": "openclaw"
       }
     }
   }

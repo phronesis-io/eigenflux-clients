@@ -1,5 +1,4 @@
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
-import { emptyPluginConfigSchema } from 'openclaw/plugin-sdk';
 
 import {
   EigenFluxPollingClient,
@@ -9,26 +8,15 @@ import {
 import { EigenFluxPmPollingClient, PmFetchResponse } from './pm-polling-client';
 import { Logger } from './logger';
 import { AuthState, CredentialsLoader } from './credentials-loader';
-import { PLUGIN_CONFIG } from './config';
-import { OpenClawAcpClient } from './acp-client';
+import { PLUGIN_CONFIG, PLUGIN_CONFIG_SCHEMA, resolvePluginConfig } from './config';
+import { resolveNotificationRoute } from './notification-route-resolver';
 import {
   buildAuthRequiredPromptTemplate,
   buildFeedPayloadPromptTemplate,
   buildPmPayloadPromptTemplate,
-} from './acp-prompt-templates';
-
-interface PluginConfig {
-  enabled?: boolean;
-}
-
-interface EigenFluxConfig {
-  enabled?: boolean;
-  gateway?: {
-    auth?: {
-      token?: string;
-    };
-  };
-}
+} from './agent-prompt-templates';
+import { EigenFluxNotifier } from './notifier';
+import { writeStoredNotificationRoute } from './session-route-memory';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -53,24 +41,30 @@ function register(api: OpenClawPluginApi): void {
   const logger = new Logger(api.logger);
   logger.info('EigenFlux activating...');
 
-  const pluginConfig = api.config as PluginConfig | undefined;
-  if (pluginConfig?.enabled === false) {
+  const pluginConfig = resolvePluginConfig(api.pluginConfig, api.config as any);
+  if (!pluginConfig.enabled) {
     logger.info('EigenFlux is disabled in configuration');
     return;
   }
 
-  const credentialsLoader = new CredentialsLoader(logger);
-  const gatewayToken = resolveGatewayToken(api.config);
-  const acpClient = new OpenClawAcpClient({
-    gatewayUrl: PLUGIN_CONFIG.OPENCLAW_GATEWAY_URL,
-    gatewayToken,
-    sessionKey: PLUGIN_CONFIG.OPENCLAW_SESSION_KEY,
-    logger,
+  const credentialsLoader = new CredentialsLoader(logger, pluginConfig.workdir);
+  const notifier = new EigenFluxNotifier(api, logger, {
+    gatewayUrl: pluginConfig.gatewayUrl,
+    gatewayToken: pluginConfig.gatewayToken,
+    workdir: pluginConfig.workdir,
+    sessionKey: pluginConfig.sessionKey,
+    agentId: pluginConfig.agentId,
+    replyChannel: pluginConfig.replyChannel,
+    replyTo: pluginConfig.replyTo,
+    replyAccountId: pluginConfig.replyAccountId,
+    openclawCliBin: pluginConfig.openclawCliBin,
+    sessionStorePath: pluginConfig.sessionStorePath,
+    routeOverrides: pluginConfig.routeOverrides,
   });
 
-  if (!gatewayToken) {
+  if (!pluginConfig.gatewayToken) {
     logger.warn(
-      'OpenClaw gateway token not found in config.gateway.auth.token or environment; ACP send may fail when gateway auth mode is token'
+      'OpenClaw gateway token not found in config.gateway.auth.token or plugin config; Gateway RPC fallback may fail when gateway auth mode is token'
     );
   }
 
@@ -78,21 +72,6 @@ function register(api: OpenClawPluginApi): void {
 
   const resetAuthPromptGate = (): void => {
     lastAuthPromptKey = null;
-  };
-
-  const sendAcpMessage = async (message: string): Promise<boolean> => {
-    try {
-      const result = await acpClient.sendMessage(message);
-      logger.info(
-        `ACP chat.send dispatched: session_key=${result.sessionKey}, run_id=${result.runId}`
-      );
-      return true;
-    } catch (error) {
-      logger.error(
-        `Failed to send ACP notification: ${error instanceof Error ? error.message : String(error)}`
-      );
-      return false;
-    }
   };
 
   const notifyAuthRequired = async (authEvent: AuthRequiredEvent): Promise<void> => {
@@ -103,35 +82,44 @@ function register(api: OpenClawPluginApi): void {
     }
     lastAuthPromptKey = promptKey;
     const authState = credentialsLoader.loadAuthState();
-    await sendAcpMessage(buildAuthRequiredMessage({ authEvent, authState }));
+    await notifier.deliver(buildAuthRequiredMessage({ authEvent, authState }));
   };
 
   const pollingClient = new EigenFluxPollingClient({
-    apiUrl: PLUGIN_CONFIG.API_URL,
+    apiUrl: pluginConfig.endpoint,
     getAuthState: () => credentialsLoader.loadAuthState(),
-    pollIntervalSec: PLUGIN_CONFIG.POLL_INTERVAL_SEC,
+    pollIntervalSec: pluginConfig.pollIntervalSec,
     logger,
     onFeedPolled: async (payload: FeedResponse) => {
       resetAuthPromptGate();
-      await sendAcpMessage(buildFeedPayloadMessage(payload));
+      await notifier.deliver(buildFeedPayloadMessage(payload));
     },
     onAuthRequired: notifyAuthRequired,
   });
 
   const pmPollingClient = new EigenFluxPmPollingClient({
-    apiUrl: PLUGIN_CONFIG.API_URL,
+    apiUrl: pluginConfig.endpoint,
     getAuthState: () => credentialsLoader.loadAuthState(),
-    pollIntervalSec: PLUGIN_CONFIG.PM_POLL_INTERVAL_SEC,
+    pollIntervalSec: pluginConfig.pmPollIntervalSec,
     logger,
     onPmFetched: async (payload: PmFetchResponse) => {
       resetAuthPromptGate();
-      await sendAcpMessage(buildPmPayloadMessage(payload));
+      await notifier.deliver(buildPmPayloadMessage(payload));
     },
     onAuthRequired: notifyAuthRequired,
   });
 
   registerService(api, logger, pollingClient, pmPollingClient);
-  registerCommand(api, logger, credentialsLoader, pollingClient, pmPollingClient);
+  registerCommand(
+    api,
+    logger,
+    credentialsLoader,
+    pollingClient,
+    pmPollingClient,
+    pluginConfig.endpoint,
+    notifier,
+    pluginConfig
+  );
 
   logger.info('EigenFlux activated');
 }
@@ -139,8 +127,8 @@ function register(api: OpenClawPluginApi): void {
 const plugin = {
   id: 'eigenflux',
   name: 'EigenFlux',
-  description: 'OpenClaw extension for EigenFlux periodic polling and ACP delivery',
-  configSchema: emptyPluginConfigSchema(),
+  description: 'OpenClaw extension for EigenFlux periodic polling with subagent delivery',
+  configSchema: PLUGIN_CONFIG_SCHEMA,
   register,
 };
 
@@ -172,7 +160,10 @@ function registerCommand(
   logger: Logger,
   credentialsLoader: CredentialsLoader,
   pollingClient: EigenFluxPollingClient,
-  pmPollingClient: EigenFluxPmPollingClient
+  pmPollingClient: EigenFluxPmPollingClient,
+  apiUrl: string,
+  notifier: EigenFluxNotifier,
+  pluginConfig: ReturnType<typeof resolvePluginConfig>
 ): void {
   if (!api.registerCommand) {
     logger.warn('registerCommand API unavailable; skipping /eigenflux command registration');
@@ -184,6 +175,7 @@ function registerCommand(
     description: 'EigenFlux plugin commands: auth, profile, poll, pm',
     acceptsArgs: true,
     handler: async (ctx) => {
+      await rememberCurrentCommandRouteIfPossible(ctx, pluginConfig, logger);
       const command = firstArg(ctx.args);
       switch (command) {
         case 'auth':
@@ -192,7 +184,7 @@ function registerCommand(
           };
         case 'profile':
           return {
-            text: await buildProfileText(credentialsLoader.loadAuthState()),
+            text: await buildProfileText(credentialsLoader.loadAuthState(), apiUrl),
           };
         case 'poll':
           return {
@@ -202,10 +194,22 @@ function registerCommand(
           return {
             text: await buildPmPollText(pmPollingClient, credentialsLoader.loadAuthState()),
           };
+        case 'sendwithsubagent':
+          return {
+            text: await buildSendWithSubagentText(
+              notifier,
+              commandRest(ctx.args),
+              'sendwithsubagent'
+            ),
+          };
+        case 'here':
+          return {
+            text: await buildHereText(ctx, pluginConfig, logger),
+          };
         default:
           return {
             text: [
-              'Usage: /eigenflux <auth|profile|poll|pm>',
+              'Usage: /eigenflux <auth|profile|poll|pm|here|sendwithsubagent>',
               '',
               '/eigenflux auth',
               'Show current EigenFlux credential status.',
@@ -218,6 +222,12 @@ function registerCommand(
               '',
               '/eigenflux pm',
               'Run one PM fetch and return the raw PM payload.',
+              '',
+              '/eigenflux here',
+              'Remember the current conversation as the default EigenFlux delivery route.',
+              '',
+              '/eigenflux sendwithsubagent <message>',
+              'Send a test message only through runtime.subagent.',
             ].join('\n'),
           };
       }
@@ -229,7 +239,198 @@ function firstArg(args: string | undefined): string {
   return args?.trim().split(/\s+/, 1)[0]?.toLowerCase() || '';
 }
 
-async function buildProfileText(authState: AuthState): Promise<string> {
+function commandRest(args: string | undefined): string {
+  const trimmed = args?.trim() || '';
+  if (!trimmed) {
+    return '';
+  }
+  const firstSpace = trimmed.indexOf(' ');
+  return firstSpace === -1 ? '' : trimmed.slice(firstSpace + 1).trim();
+}
+
+function readNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeChannel(value: unknown): string | undefined {
+  return readNonEmptyString(value)?.toLowerCase();
+}
+
+function isNormalizedConversationTarget(value: string): boolean {
+  return /^(user|chat|channel|room):/u.test(value);
+}
+
+function normalizeReplyTarget(
+  value: unknown,
+  channel: string | undefined,
+  fallbackKind?: 'user' | 'chat' | 'channel' | 'room'
+): string | undefined {
+  const trimmed = readNonEmptyString(value);
+  if (!trimmed) {
+    return undefined;
+  }
+  if (isNormalizedConversationTarget(trimmed)) {
+    return trimmed;
+  }
+  if (channel && trimmed.startsWith(`${channel}:`)) {
+    const inner = trimmed.slice(channel.length + 1).trim();
+    if (isNormalizedConversationTarget(inner)) {
+      return inner;
+    }
+    return fallbackKind ? `${fallbackKind}:${inner}` : inner;
+  }
+  return fallbackKind ? `${fallbackKind}:${trimmed}` : trimmed;
+}
+
+async function resolveCurrentCommandRoute(
+  ctx: {
+    channel?: string;
+    to?: string;
+    from?: string;
+    accountId?: string;
+    getCurrentConversationBinding?: () => Promise<{
+      channel: string;
+      accountId: string;
+      conversationId: string;
+      parentConversationId?: string;
+    } | null>;
+  },
+  pluginConfig: ReturnType<typeof resolvePluginConfig>,
+  logger: Logger
+) {
+  const channel = normalizeChannel(ctx.channel);
+  const accountId = readNonEmptyString(ctx.accountId);
+
+  let replyChannel = channel;
+  let replyTo =
+    normalizeReplyTarget(ctx.to, channel) ?? normalizeReplyTarget(ctx.from, channel, 'user');
+  let replyAccountId = accountId;
+
+  if (typeof ctx.getCurrentConversationBinding === 'function') {
+    try {
+      const binding = await ctx.getCurrentConversationBinding();
+      if (binding) {
+        replyChannel = normalizeChannel(binding.channel) ?? replyChannel;
+        replyTo =
+          normalizeReplyTarget(binding.conversationId, replyChannel) ??
+          normalizeReplyTarget(binding.parentConversationId, replyChannel) ??
+          replyTo;
+        replyAccountId = readNonEmptyString(binding.accountId) ?? replyAccountId;
+      }
+    } catch (error) {
+      logger.debug(
+        `Failed to read current conversation binding: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  if (!replyChannel || !replyTo) {
+    return undefined;
+  }
+
+  const route = resolveNotificationRoute(
+    {
+      sessionKey: 'main',
+      agentId: pluginConfig.agentId,
+      replyChannel,
+      replyTo,
+      replyAccountId,
+      sessionStorePath: pluginConfig.sessionStorePath,
+      workdir: pluginConfig.workdir,
+      routeOverrides: {
+        sessionKey: false,
+        agentId: false,
+        replyChannel: true,
+        replyTo: true,
+        replyAccountId: replyAccountId !== undefined,
+      },
+    },
+    logger
+  );
+
+  if (!route.replyChannel || !route.replyTo) {
+    return undefined;
+  }
+
+  return route;
+}
+
+async function buildHereText(
+  ctx: {
+    channel?: string;
+    to?: string;
+    from?: string;
+    accountId?: string;
+    getCurrentConversationBinding?: () => Promise<{
+      channel: string;
+      accountId: string;
+      conversationId: string;
+      parentConversationId?: string;
+    } | null>;
+  },
+  pluginConfig: ReturnType<typeof resolvePluginConfig>,
+  logger: Logger
+): Promise<string> {
+  const route = await resolveCurrentCommandRoute(ctx, pluginConfig, logger);
+  if (!route || route.sessionKey === 'main' || route.sessionKey.endsWith(':main')) {
+    return [
+      'Unable to resolve the current external session.',
+      'Run `/eigenflux here` inside the target conversation after OpenClaw has already created a session for it.',
+    ].join('\n');
+  }
+
+  const saved = writeStoredNotificationRoute(pluginConfig.workdir, route, logger);
+  if (!saved) {
+    return 'Failed to persist the current EigenFlux route; check plugin logs for details.';
+  }
+
+  return [
+    'EigenFlux will deliver to this conversation by default:',
+    `sessionKey: ${route.sessionKey}`,
+    `agentId: ${route.agentId}`,
+    `channel: ${route.replyChannel ?? 'unknown'}`,
+    `target: ${route.replyTo ?? 'unknown'}`,
+    route.replyAccountId ? `account: ${route.replyAccountId}` : undefined,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function rememberCurrentCommandRouteIfPossible(
+  ctx: {
+    channel?: string;
+    to?: string;
+    from?: string;
+    accountId?: string;
+    getCurrentConversationBinding?: () => Promise<{
+      channel: string;
+      accountId: string;
+      conversationId: string;
+      parentConversationId?: string;
+    } | null>;
+  },
+  pluginConfig: ReturnType<typeof resolvePluginConfig>,
+  logger: Logger
+): Promise<void> {
+  const route = await resolveCurrentCommandRoute(ctx, pluginConfig, logger);
+  if (!route || route.sessionKey === 'main' || route.sessionKey.endsWith(':main')) {
+    return;
+  }
+
+  if (
+    writeStoredNotificationRoute(pluginConfig.workdir, route, logger)
+  ) {
+    logger.debug(
+      `Remembered current command route: session_key=${route.sessionKey}, channel=${route.replyChannel ?? 'unknown'}, to=${route.replyTo ?? 'unknown'}`
+    );
+  }
+}
+
+async function buildProfileText(authState: AuthState, apiUrl: string): Promise<string> {
   if (authState.status !== 'available') {
     return buildAuthRequiredMessage({
       authEvent: {
@@ -244,7 +445,7 @@ async function buildProfileText(authState: AuthState): Promise<string> {
 
   try {
     const payload = await fetchJson<ProfileResponseData>(
-      `${PLUGIN_CONFIG.API_URL}/api/v1/agents/me`,
+      `${apiUrl}/api/v1/agents/me`,
       authState.accessToken
     );
     return [
@@ -312,6 +513,22 @@ async function buildPmPollText(
     default:
       return 'EigenFlux PM poll finished with an unknown result.';
   }
+}
+
+async function buildSendWithSubagentText(
+  notifier: EigenFluxNotifier,
+  rawArgs: string,
+  commandName: string
+): Promise<string> {
+  const message = rawArgs.trim();
+  if (!message) {
+    return `Usage: /eigenflux ${commandName} <message>`;
+  }
+
+  const delivered = await notifier.deliverWithSubagent(message);
+  return delivered
+    ? `runtime.subagent dispatched: ${message}`
+    : 'runtime.subagent dispatch failed; check plugin logs for details.';
 }
 
 async function fetchJson<T extends JsonRecord>(
@@ -390,22 +607,4 @@ function safeJsonStringify(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-function resolveGatewayToken(config: EigenFluxConfig | undefined): string | undefined {
-  const fromConfig = typeof config?.gateway?.auth?.token === 'string'
-    ? config.gateway.auth.token.trim()
-    : '';
-  if (fromConfig) {
-    return fromConfig;
-  }
-
-  for (const key of PLUGIN_CONFIG.GATEWAY_TOKEN_ENV_KEYS) {
-    const value = process.env[key];
-    if (typeof value === 'string' && value.trim().length > 0) {
-      return value.trim();
-    }
-  }
-
-  return undefined;
 }

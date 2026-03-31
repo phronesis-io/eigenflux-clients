@@ -1,9 +1,9 @@
 import http from 'http';
 import { WebSocketServer } from 'ws';
-import { OpenClawAcpClient } from './acp-client';
+import { OpenClawGatewayRpcClient } from './gateway-rpc-client';
 import { Logger } from './logger';
 
-describe('OpenClawAcpClient', () => {
+describe('OpenClawGatewayRpcClient', () => {
   let server: http.Server;
   let wss: WebSocketServer;
   let port: number;
@@ -24,9 +24,9 @@ describe('OpenClawAcpClient', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  test('uses configured session key and sends chat.send directly', async () => {
+  test('uses configured session key and sends agent directly', async () => {
     const methods: string[] = [];
-    let chatSendParams: any = null;
+    let agentParams: any = null;
 
     wss.on('connection', (socket) => {
       socket.send(
@@ -50,7 +50,7 @@ describe('OpenClawAcpClient', () => {
               payload: {
                 protocol: 3,
                 server: { version: 'test', connId: 'conn-1' },
-                features: { methods: ['chat.send'], events: [] },
+                features: { methods: ['agent'], events: [] },
                 snapshot: { ts: Date.now() },
                 policy: { maxPayload: 1000000, maxBufferedBytes: 1000000, tickIntervalMs: 30000 },
               },
@@ -59,8 +59,8 @@ describe('OpenClawAcpClient', () => {
           return;
         }
 
-        if (frame.method === 'chat.send') {
-          chatSendParams = frame.params;
+        if (frame.method === 'agent') {
+          agentParams = frame.params;
           socket.send(
             JSON.stringify({
               type: 'res',
@@ -73,31 +73,38 @@ describe('OpenClawAcpClient', () => {
       });
     });
 
-    const client = new OpenClawAcpClient({
+    const client = new OpenClawGatewayRpcClient({
       gatewayUrl: `ws://127.0.0.1:${port}`,
       gatewayToken: 'gw_token_1',
-      sessionKey: 'agent:test:main',
+      sessionKey: 'agent:test:feishu:direct:ou_123',
+      agentId: 'test',
+      replyChannel: 'feishu',
+      replyTo: 'ou_123',
       logger: new Logger({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }),
     });
 
-    const result = await client.sendMessage('[EIGENFLUX_TEST] first payload');
+    const result = await client.sendAgentMessage('[EIGENFLUX_TEST] first payload');
 
     expect(result).toEqual({
-      sessionKey: 'agent:test:main',
+      sessionKey: 'agent:test:feishu:direct:ou_123',
       runId: 'run-1',
     });
-    expect(methods).toEqual(['connect', 'chat.send']);
-    expect(chatSendParams).toEqual(
+    expect(methods).toEqual(['connect', 'agent']);
+    expect(agentParams).toEqual(
       expect.objectContaining({
-        sessionKey: 'agent:test:main',
+        sessionKey: 'agent:test:feishu:direct:ou_123',
+        agentId: 'test',
         message: '[EIGENFLUX_TEST] first payload',
+        deliver: true,
+        replyChannel: 'feishu',
+        replyTo: 'ou_123',
       })
     );
   });
 
   test('resolves session key from sessions.list when not configured', async () => {
     const methods: string[] = [];
-    let chatSendParams: any = null;
+    let agentParams: any = null;
 
     wss.on('connection', (socket) => {
       socket.send(
@@ -121,7 +128,7 @@ describe('OpenClawAcpClient', () => {
               payload: {
                 protocol: 3,
                 server: { version: 'test', connId: 'conn-2' },
-                features: { methods: ['sessions.list', 'chat.send'], events: [] },
+                features: { methods: ['sessions.list', 'agent'], events: [] },
                 snapshot: { ts: Date.now() },
                 policy: { maxPayload: 1000000, maxBufferedBytes: 1000000, tickIntervalMs: 30000 },
               },
@@ -137,15 +144,15 @@ describe('OpenClawAcpClient', () => {
               id: frame.id,
               ok: true,
               payload: {
-                sessions: [{ key: 'main' }, { key: 'agent:foo:bar' }],
+                sessions: [{ key: 'agent:foo:main' }, { key: 'agent:foo:feishu:direct:ou_999', active: true }],
               },
             })
           );
           return;
         }
 
-        if (frame.method === 'chat.send') {
-          chatSendParams = frame.params;
+        if (frame.method === 'agent') {
+          agentParams = frame.params;
           socket.send(
             JSON.stringify({
               type: 'res',
@@ -158,23 +165,25 @@ describe('OpenClawAcpClient', () => {
       });
     });
 
-    const client = new OpenClawAcpClient({
+    const client = new OpenClawGatewayRpcClient({
       gatewayUrl: `ws://127.0.0.1:${port}`,
       gatewayToken: 'gw_token_2',
       logger: new Logger({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }),
     });
 
-    const result = await client.sendMessage('[EIGENFLUX_TEST] second payload');
+    const result = await client.sendAgentMessage('[EIGENFLUX_TEST] second payload');
 
     expect(result).toEqual({
-      sessionKey: 'main',
+      sessionKey: 'agent:foo:feishu:direct:ou_999',
       runId: 'run-2',
     });
-    expect(methods).toEqual(['connect', 'sessions.list', 'chat.send']);
-    expect(chatSendParams).toEqual(
+    expect(methods).toEqual(['connect', 'sessions.list', 'agent']);
+    expect(agentParams).toEqual(
       expect.objectContaining({
-        sessionKey: 'main',
+        sessionKey: 'agent:foo:feishu:direct:ou_999',
+        agentId: 'foo',
         message: '[EIGENFLUX_TEST] second payload',
+        deliver: true,
       })
     );
   });

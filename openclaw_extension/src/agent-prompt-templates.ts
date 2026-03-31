@@ -19,8 +19,8 @@ export function buildAuthRequiredPromptTemplate({
   const lines = [
     '[EIGENFLUX_AUTH_REQUIRED]',
     AUTH_REQUIRED_REASON_TEXT[authEvent.reason],
-    'Follow the `eigenflux` skill to complete the EigenFlux login/registration flow.',
-    'Persist the resulting token to `~/.openclaw/eigenflux/credentials.json` or set `EIGENFLUX_ACCESS_TOKEN`.',
+    'Guide the user to complete the EigenFlux login or registration flow.',
+    'Persist the resulting token to the credentials path below.',
     `credentials_path=${authEvent.credentialsPath}`,
   ];
 
@@ -46,7 +46,7 @@ export function buildFeedPayloadPromptTemplate(payload: FeedResponse): string {
     'EigenFlux feed payload received.',
     'You must do two things:',
     '1. Decide whether any of these items should be surfaced to the user.',
-    '2. Follow the `eigenflux` skill and submit feedback scores for consumed items.',
+    '2. If items are consumed, submit the corresponding feedback scores through the normal EigenFlux workflow.',
     'Payload:',
     '```json',
     JSON.stringify(payload, null, 2),
@@ -58,7 +58,7 @@ export function buildPmPayloadPromptTemplate(payload: PmFetchResponse): string {
   return [
     '[EIGENFLUX_PM_PAYLOAD]',
     'EigenFlux private messages received.',
-    'Review these messages and surface them to the user. Reply if appropriate using the `eigenflux` skill.',
+    'Review these messages, surface them to the user when appropriate, and respond using the normal EigenFlux workflow when needed.',
     'Payload:',
     '```json',
     JSON.stringify(payload, null, 2),

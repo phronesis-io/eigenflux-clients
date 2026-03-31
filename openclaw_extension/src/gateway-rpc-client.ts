@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { Logger } from './logger';
 
-const ACP_PROTOCOL_VERSION = 3;
+const GATEWAY_PROTOCOL_VERSION = 3;
 const DEFAULT_CONNECT_TIMEOUT_MS = 8000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
 const DEFAULT_SESSION_KEY = 'main';
+const DEFAULT_AGENT_ID = 'main';
 
 type GatewayRequest = {
   type: 'req';
@@ -37,36 +38,57 @@ type PendingRequest = {
   reject: (error: Error) => void;
 };
 
-export type OpenClawAcpClientOptions = {
+export type OpenClawGatewayRpcClientOptions = {
   gatewayUrl: string;
   gatewayToken?: string;
   sessionKey?: string;
+  agentId?: string;
+  replyChannel?: string;
+  replyTo?: string;
+  replyAccountId?: string;
   logger: Logger;
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
 };
 
-export class OpenClawAcpClient {
-  private readonly options: OpenClawAcpClientOptions;
+export class OpenClawGatewayRpcClient {
+  private readonly options: OpenClawGatewayRpcClientOptions;
 
-  constructor(options: OpenClawAcpClientOptions) {
+  constructor(options: OpenClawGatewayRpcClientOptions) {
     this.options = options;
   }
 
-  async sendMessage(message: string): Promise<{ sessionKey: string; runId: string }> {
+  async sendAgentMessage(message: string): Promise<{ sessionKey: string; runId: string }> {
     return this.withConnection(async (conn) => {
       const sessionKey = this.options.sessionKey || (await this.resolveSessionKey(conn));
+      const agentId = this.options.agentId?.trim() || this.resolveAgentIdFromSessionKey(sessionKey);
       const idempotencyKey = randomUUID();
 
-      const response = await conn.request('chat.send', {
+      const response = await conn.request('agent', {
         sessionKey,
+        agentId,
         message,
+        deliver: true,
+        ...(this.options.replyChannel ? { replyChannel: this.options.replyChannel } : {}),
+        ...(this.options.replyTo ? { replyTo: this.options.replyTo } : {}),
+        ...(this.options.replyAccountId
+          ? { replyAccountId: this.options.replyAccountId }
+          : {}),
         idempotencyKey,
       });
 
       const runId = String(response?.runId || idempotencyKey);
       return { sessionKey, runId };
     });
+  }
+
+  private resolveAgentIdFromSessionKey(sessionKey: string | undefined): string {
+    const trimmed = sessionKey?.trim() || '';
+    const parts = trimmed.split(':').filter((part) => part.length > 0);
+    if (parts[0]?.toLowerCase() === 'agent' && typeof parts[1] === 'string' && parts[1].trim()) {
+      return parts[1].trim().toLowerCase();
+    }
+    return DEFAULT_AGENT_ID;
   }
 
   private async resolveSessionKey(conn: GatewayConnection): Promise<string> {
@@ -78,7 +100,7 @@ export class OpenClawAcpClient {
         includeLastMessage: false,
       });
       const sessions = Array.isArray(response?.sessions)
-        ? (response.sessions as Array<{ key?: unknown; active?: unknown; kind?: unknown; channel?: unknown }>)
+        ? (response.sessions as Array<{ key?: unknown; active?: unknown; kind?: unknown }>)
         : [];
       const byMainKey = sessions.find((entry) => entry && entry.key === DEFAULT_SESSION_KEY);
       if (byMainKey && typeof byMainKey.key === 'string') {
@@ -99,19 +121,14 @@ export class OpenClawAcpClient {
         return byActive.key;
       }
 
-      const byWebchat = sessions.find(
-        (entry) => entry && typeof entry.key === 'string' && String(entry.channel || '').toLowerCase() === 'webchat'
-      );
-      if (byWebchat && typeof byWebchat.key === 'string') {
-        return byWebchat.key;
-      }
-
       const first = sessions.find((entry) => entry && typeof entry.key === 'string');
       if (first && typeof first.key === 'string') {
         return first.key;
       }
     } catch (error) {
-      this.options.logger.warn(`sessions.list failed, fallback to "${DEFAULT_SESSION_KEY}": ${this.formatError(error)}`);
+      this.options.logger.warn(
+        `sessions.list failed, fallback to "${DEFAULT_SESSION_KEY}": ${this.formatError(error)}`
+      );
     }
     return DEFAULT_SESSION_KEY;
   }
@@ -173,7 +190,7 @@ class GatewayConnection {
       let settled = false;
       let connectRequested = false;
       const connectTimer = setTimeout(() => {
-        onConnectError(new Error(`ACP connect timeout after ${this.options.connectTimeoutMs}ms`));
+        onConnectError(new Error(`Gateway connect timeout after ${this.options.connectTimeoutMs}ms`));
       }, this.options.connectTimeoutMs);
 
       const cleanup = () => {
@@ -199,10 +216,10 @@ class GatewayConnection {
       this.ws?.on('error', onConnectError);
       this.ws?.on('close', () => {
         if (!this.connected) {
-          onConnectError(new Error('ACP gateway closed before connect'));
+          onConnectError(new Error('Gateway closed before connect'));
           return;
         }
-        this.rejectAllPending(new Error('ACP gateway connection closed'));
+        this.rejectAllPending(new Error('Gateway connection closed'));
       });
 
       this.ws?.on('message', (data) => {
@@ -246,7 +263,7 @@ class GatewayConnection {
   }
 
   async close(): Promise<void> {
-    this.rejectAllPending(new Error('ACP request cancelled: connection closed'));
+    this.rejectAllPending(new Error('Gateway request cancelled: connection closed'));
     if (!this.ws) {
       return;
     }
@@ -262,7 +279,7 @@ class GatewayConnection {
 
   async request(method: string, params?: unknown): Promise<any> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error(`ACP request failed (${method}): websocket is not open`);
+      throw new Error(`Gateway request failed (${method}): websocket is not open`);
     }
 
     const id = randomUUID();
@@ -276,7 +293,7 @@ class GatewayConnection {
     return new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`ACP request timeout (${method}) after ${this.options.requestTimeoutMs}ms`));
+        reject(new Error(`Gateway request timeout (${method}) after ${this.options.requestTimeoutMs}ms`));
       }, this.options.requestTimeoutMs);
 
       this.pending.set(id, { timer, resolve, reject });
@@ -297,7 +314,7 @@ class GatewayConnection {
     }
     const nonce = frame.payload?.nonce;
     if (typeof nonce !== 'string' || nonce.trim().length === 0) {
-      throw new Error('ACP connect.challenge missing nonce');
+      throw new Error('Gateway connect.challenge missing nonce');
     }
     this.connectNonce = nonce.trim();
   }
@@ -319,18 +336,17 @@ class GatewayConnection {
 
   private buildConnectParams(): Record<string, unknown> {
     if (!this.connectNonce) {
-      throw new Error('ACP connect failed: missing challenge nonce');
+      throw new Error('Gateway connect failed: missing challenge nonce');
     }
 
-    const authToken = typeof this.options.gatewayToken === 'string'
-      ? this.options.gatewayToken.trim()
-      : '';
+    const authToken =
+      typeof this.options.gatewayToken === 'string' ? this.options.gatewayToken.trim() : '';
 
     const params: Record<string, unknown> = {
-      minProtocol: ACP_PROTOCOL_VERSION,
-      maxProtocol: ACP_PROTOCOL_VERSION,
+      minProtocol: GATEWAY_PROTOCOL_VERSION,
+      maxProtocol: GATEWAY_PROTOCOL_VERSION,
       client: {
-        id: 'gateway-client',
+        id: 'eigenflux-gateway-client',
         displayName: 'eigenflux',
         version: '1.0.0',
         platform: process.platform,

@@ -47,7 +47,7 @@ export interface PollingClientConfig {
 export interface AuthRequiredEvent {
   reason: 'missing_token' | 'expired_token' | 'unauthorized';
   credentialsPath: string;
-  source?: 'file' | 'env';
+  source?: 'file';
   expiresAt?: number;
   statusCode?: number;
 }

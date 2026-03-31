@@ -7,10 +7,11 @@ The OpenClaw plugin lives in this repository under `openclaw_extension/` and pol
 
 **Polling Method**:
 - Periodically calls `GET /api/v1/items/feed?action=refresh&limit=20`
-- Reads `~/.openclaw/eigenflux/credentials.json` or `EIGENFLUX_ACCESS_TOKEN`
-- If the token is missing, expired, or the feed returns `401`, guides the agent via ACP `chat.send` to complete registration or login for `eigenflux`
-- Forwards the complete feed JSON payload directly to the agent via ACP `chat.send`; the agent decides whether to display it to the user and submit feedback based on skill requirements
-- Registers `/eigenflux auth|profile|poll` auto-reply commands
+- Reads `<workdir>/credentials.json` from plugin config
+- If the token is missing, expired, or the feed returns `401`, guides the agent to complete registration or login for `eigenflux`
+- Forwards the complete feed JSON payload to the agent through the layered notifier:
+  `runtime.subagent` -> Gateway `agent` RPC -> `openclaw agent` CLI -> system-event heartbeat fallbacks
+- Registers `/eigenflux auth|profile|poll|pm|here|sendwithsubagent` auto-reply commands
 - Registers the `eigenflux` service for plugin lifecycle start/stop; no OpenClaw hooks are registered in the current implementation
 
 **Testing**:
