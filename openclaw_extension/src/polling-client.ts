@@ -3,7 +3,7 @@
  */
 
 import { AuthState } from './credentials-loader';
-import { PLUGIN_CONFIG } from './config';
+import { buildEigenFluxRequestHeaders } from './config';
 import { Logger } from './logger';
 
 export interface FeedItem {
@@ -75,6 +75,7 @@ export class EigenFluxPollingClient {
   private config: PollingClientConfig;
   private intervalId: NodeJS.Timeout | null = null;
   private isRunning = false;
+  private activePoll: Promise<PollResult> | null = null;
 
   constructor(config: PollingClientConfig) {
     this.config = config;
@@ -117,50 +118,24 @@ export class EigenFluxPollingClient {
   }
 
   async pollOnce(options: PollOnceOptions = {}): Promise<PollResult> {
-    const notifyFeed = options.notifyFeed ?? true;
-    const notifyAuthRequired = options.notifyAuthRequired ?? true;
-    const authState = this.config.getAuthState();
-    if (authState.status !== 'available') {
-      this.config.logger.warn(
-        `No usable access token available (status=${authState.status}), skipping poll`
-      );
-      const authEvent: AuthRequiredEvent = {
-        reason: authState.status === 'expired' ? 'expired_token' : 'missing_token',
-        credentialsPath: authState.credentialsPath,
-        source: authState.source,
-        expiresAt: authState.expiresAt,
-      };
-      if (notifyAuthRequired) {
-        await this.config.onAuthRequired(authEvent);
-      }
-      return {
-        kind: 'auth_required',
-        authEvent,
-      };
+    if (this.activePoll) {
+      this.config.logger.warn('Skipping feed poll because a previous poll is still in progress');
+      return this.activePoll;
     }
 
-    const url = `${this.config.apiUrl}/api/v1/items/feed?action=refresh&limit=20`;
-
-    try {
-      this.config.logger.info(`Polling feed request: ${url}`);
-      this.config.logger.debug(`Polling: ${url}`);
-
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${authState.accessToken}`,
-          'Content-Type': 'application/json',
-          'User-Agent': PLUGIN_CONFIG.USER_AGENT,
-        },
-      });
-
-      if (response.status === 401) {
+    const run = async (): Promise<PollResult> => {
+      const notifyFeed = options.notifyFeed ?? true;
+      const notifyAuthRequired = options.notifyAuthRequired ?? true;
+      const authState = this.config.getAuthState();
+      if (authState.status !== 'available') {
+        this.config.logger.warn(
+          `No usable access token available (status=${authState.status}), skipping poll`
+        );
         const authEvent: AuthRequiredEvent = {
-          reason: 'unauthorized',
+          reason: authState.status === 'expired' ? 'expired_token' : 'missing_token',
           credentialsPath: authState.credentialsPath,
           source: authState.source,
           expiresAt: authState.expiresAt,
-          statusCode: 401,
         };
         if (notifyAuthRequired) {
           await this.config.onAuthRequired(authEvent);
@@ -171,39 +146,73 @@ export class EigenFluxPollingClient {
         };
       }
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      const url = `${this.config.apiUrl}/api/v1/items/feed?action=refresh&limit=20`;
+
+      try {
+        this.config.logger.info(`Polling feed request: ${url}`);
+        this.config.logger.debug(`Polling: ${url}`);
+
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: buildEigenFluxRequestHeaders(authState.accessToken),
+        });
+
+        if (response.status === 401) {
+          const authEvent: AuthRequiredEvent = {
+            reason: 'unauthorized',
+            credentialsPath: authState.credentialsPath,
+            source: authState.source,
+            expiresAt: authState.expiresAt,
+            statusCode: 401,
+          };
+          if (notifyAuthRequired) {
+            await this.config.onAuthRequired(authEvent);
+          }
+          return {
+            kind: 'auth_required',
+            authEvent,
+          };
+        }
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = (await response.json()) as FeedResponse;
+
+        if (data.code !== 0) {
+          throw new Error(`API error: ${data.msg}`);
+        }
+
+        const items = data.data.items ?? [];
+        const notifications = data.data.notifications ?? [];
+        this.config.logger.info(
+          `Polled feed: ${items.length} items, notifications=${notifications.length}, has_more=${data.data.has_more}`
+        );
+
+        if (notifyFeed && (items.length > 0 || notifications.length > 0)) {
+          await this.config.onFeedPolled(data);
+        }
+        return {
+          kind: 'success',
+          payload: data,
+        };
+      } catch (error) {
+        const normalized = error instanceof Error ? error : new Error(String(error));
+        this.config.logger.error(
+          `Failed to poll feed (url=${url}): ${this.formatError(normalized)}`
+        );
+        return {
+          kind: 'error',
+          error: normalized,
+        };
       }
+    };
 
-      const data = (await response.json()) as FeedResponse;
-
-      if (data.code !== 0) {
-        throw new Error(`API error: ${data.msg}`);
-      }
-
-      const items = data.data.items ?? [];
-      const notifications = data.data.notifications ?? [];
-      this.config.logger.info(
-        `Polled feed: ${items.length} items, notifications=${notifications.length}, has_more=${data.data.has_more}`
-      );
-
-      if (notifyFeed && (items.length > 0 || notifications.length > 0)) {
-        await this.config.onFeedPolled(data);
-      }
-      return {
-        kind: 'success',
-        payload: data,
-      };
-    } catch (error) {
-      const normalized = error instanceof Error ? error : new Error(String(error));
-      this.config.logger.error(
-        `Failed to poll feed (url=${url}): ${this.formatError(normalized)}`
-      );
-      return {
-        kind: 'error',
-        error: normalized,
-      };
-    }
+    this.activePoll = run().finally(() => {
+      this.activePoll = null;
+    });
+    return this.activePoll;
   }
 
   private formatError(error: unknown): string {

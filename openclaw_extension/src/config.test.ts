@@ -7,6 +7,19 @@ import {
   resolvePluginConfig,
   resolveServerSkillPath,
 } from './config';
+import { Logger } from './logger';
+
+const packageManifest = require('../package.json') as { version: string };
+const pluginManifest = require('../openclaw.plugin.json') as { version: string };
+
+function createLoggerSpies() {
+  return {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  };
+}
 
 describe('resolvePluginConfig', () => {
   test('prepends the default eigenflux server when servers is omitted', () => {
@@ -146,6 +159,66 @@ describe('resolvePluginConfig', () => {
 
     expect(config.gatewayToken).toBe('gw_host_token');
   });
+
+  test('clamps oversized polling intervals to one day and logs a warning', () => {
+    const loggerSpies = createLoggerSpies();
+    const config = resolvePluginConfig(
+      {
+        servers: [
+          {
+            name: 'eigenflux',
+            pollInterval: 3600000,
+            pmPollInterval: 999999,
+          },
+        ],
+      },
+      undefined,
+      new Logger(loggerSpies)
+    );
+
+    expect(config.servers[0]).toEqual(
+      expect.objectContaining({
+        pollIntervalSec: PLUGIN_CONFIG.MAX_POLL_INTERVAL_SEC,
+        pmPollIntervalSec: PLUGIN_CONFIG.MAX_POLL_INTERVAL_SEC,
+      })
+    );
+    expect(loggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('[EigenFlux] pollInterval for server "eigenflux" exceeds 86400s; clamping to 86400s')
+    );
+    expect(loggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('[EigenFlux] pmPollInterval for server "eigenflux" exceeds 86400s; clamping to 86400s')
+    );
+  });
+
+  test('clamps undersized polling intervals to ten seconds and logs a warning', () => {
+    const loggerSpies = createLoggerSpies();
+    const config = resolvePluginConfig(
+      {
+        servers: [
+          {
+            name: 'eigenflux',
+            pollInterval: 1,
+            pmPollInterval: 5,
+          },
+        ],
+      },
+      undefined,
+      new Logger(loggerSpies)
+    );
+
+    expect(config.servers[0]).toEqual(
+      expect.objectContaining({
+        pollIntervalSec: PLUGIN_CONFIG.MIN_POLL_INTERVAL_SEC,
+        pmPollIntervalSec: PLUGIN_CONFIG.MIN_POLL_INTERVAL_SEC,
+      })
+    );
+    expect(loggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('[EigenFlux] pollInterval for server "eigenflux" is below 10s; clamping to 10s')
+    );
+    expect(loggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('[EigenFlux] pmPollInterval for server "eigenflux" is below 10s; clamping to 10s')
+    );
+  });
 });
 
 describe('resolveServerSkillPath', () => {
@@ -178,11 +251,13 @@ describe('resolveServerSkillPath', () => {
   });
 });
 
-describe('PLUGIN_CONFIG USER_AGENT', () => {
-  test('includes eigenflux plugin version', () => {
-    expect(PLUGIN_CONFIG.USER_AGENT).toContain('eigenflux-plugin');
+describe('PLUGIN_CONFIG metadata', () => {
+  test('keeps runtime metadata aligned with manifests', () => {
     expect(PLUGIN_CONFIG.USER_AGENT).toContain('node/');
     expect(PLUGIN_CONFIG.USER_AGENT).toMatch(/\(.*;\s*.*;\s*.*\)/);
-    expect(PLUGIN_CONFIG.PLUGIN_VERSION).toBe('0.0.1-alpha.0');
+    expect(PLUGIN_CONFIG.USER_AGENT).not.toContain('eigenflux-plugin');
+    expect(PLUGIN_CONFIG.PLUGIN_VERSION).toBe(packageManifest.version);
+    expect(PLUGIN_CONFIG.PLUGIN_VERSION).toBe(pluginManifest.version);
+    expect(PLUGIN_CONFIG.HOST_KIND).toBe('openclaw');
   });
 });

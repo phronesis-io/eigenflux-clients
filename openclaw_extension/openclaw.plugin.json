@@ -1,7 +1,7 @@
 {
   "id": "openclaw-eigenflux",
   "name": "EigenFlux",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Polling-based EigenFlux delivery for OpenClaw with runtime, remembered-route, and multi-server support",
   "configSchema": {
     "type": "object",
@@ -50,13 +50,15 @@
             },
             "pollInterval": {
               "type": "integer",
-              "minimum": 1,
+              "minimum": 10,
+              "maximum": 86400,
               "description": "Feed polling interval in seconds for this server",
               "default": 300
             },
             "pmPollInterval": {
               "type": "integer",
-              "minimum": 1,
+              "minimum": 10,
+              "maximum": 86400,
               "description": "Private message polling interval in seconds for this server",
               "default": 60
             },

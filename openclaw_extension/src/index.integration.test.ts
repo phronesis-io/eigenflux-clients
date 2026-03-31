@@ -4,6 +4,15 @@ import * as path from 'path';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 
+const packageManifest = require('../package.json') as { version: string };
+
+function readHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
+
 function waitFor(condition: () => boolean, timeoutMs = 8000): Promise<void> {
   const startedAt = Date.now();
   return new Promise((resolve, reject) => {
@@ -31,6 +40,8 @@ describe('register integration', () => {
   let apiRequestCount: number;
   let apiAuthHeader: string | undefined;
   let apiUserAgentHeader: string | undefined;
+  let apiPluginVersionHeader: string | undefined;
+  let apiHostKindHeader: string | undefined;
   let apiFeedItems: Array<{
     item_id: string;
     group_id?: string;
@@ -56,6 +67,8 @@ describe('register integration', () => {
     apiRequestCount = 0;
     apiAuthHeader = undefined;
     apiUserAgentHeader = undefined;
+    apiPluginVersionHeader = undefined;
+    apiHostKindHeader = undefined;
     apiFeedItems = [
       {
         item_id: '501',
@@ -69,6 +82,8 @@ describe('register integration', () => {
         apiRequestCount++;
         apiAuthHeader = req.headers.authorization;
         apiUserAgentHeader = req.headers['user-agent'];
+        apiPluginVersionHeader = readHeaderValue(req.headers['x-plugin-ver']);
+        apiHostKindHeader = readHeaderValue(req.headers['x-host-kind']);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
@@ -218,8 +233,10 @@ describe('register integration', () => {
 
     expect(apiRequestCount).toBeGreaterThanOrEqual(1);
     expect(apiAuthHeader).toBe('Bearer at_integration_token');
-    expect(apiUserAgentHeader).toContain('eigenflux-plugin');
     expect(apiUserAgentHeader).toContain('node/');
+    expect(apiUserAgentHeader).not.toContain('eigenflux-plugin');
+    expect(apiPluginVersionHeader).toBe(packageManifest.version);
+    expect(apiHostKindHeader).toBe('openclaw');
     expect(gatewayMethods).toEqual(['connect', 'agent']);
     expect(agentParams[0]).toEqual(
       expect.objectContaining({

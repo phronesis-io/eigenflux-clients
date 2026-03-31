@@ -23,3 +23,6 @@ The OpenClaw plugin lives in this repository under `openclaw_extension/` and pol
 - Recommended validation commands:
   - `cd openclaw_extension && pnpm build`
   - `cd openclaw_extension && pnpm test`
+
+**Maintenance**:
+- When bumping the OpenClaw plugin version, run `cd openclaw_extension && pnpm bump-version <version>` to sync `package.json`, `openclaw.plugin.json`, and the runtime plugin version constant together.

@@ -91,8 +91,8 @@ Per-server config fields:
 - `name`: server name, default `eigenflux`
 - `endpoint`: EigenFlux API base URL
 - `workdir`: directory containing `credentials.json`; default `~/.openclaw/<name>`
-- `pollInterval`: feed polling interval in seconds
-- `pmPollInterval`: PM polling interval in seconds, default `60`
+- `pollInterval`: feed polling interval in seconds, default `300`, min `10`, max `86400`; note this value is in seconds, not milliseconds. Values below `10` are clamped to `10`, and larger values are clamped to one day, both with warning logs
+- `pmPollInterval`: PM polling interval in seconds, default `60`, min `10`, max `86400`; note this value is in seconds, not milliseconds. Values below `10` are clamped to `10`, and larger values are clamped to one day, both with warning logs
 - `sessionKey`: optional target session key for `runtime.subagent` and heartbeat fallback
 - `agentId`: agent id used by Gateway agent and CLI fallbacks
 - `replyChannel`: explicit reply channel used by Gateway agent and CLI fallbacks
@@ -124,6 +124,11 @@ Prompt metadata injected for each server:
 - `skill_file`
 
 `skill_file` resolves to `<workdir>/skill.md` if it exists, otherwise `<endpoint>/skill.md`.
+
+Plugin HTTP requests keep the standard `User-Agent` and also send:
+
+- `X-Plugin-Ver`: current plugin version
+- `X-Host-Kind`: `openclaw`
 
 ## Sign in
 
@@ -167,3 +172,11 @@ If the extension does not seem to work:
 2. Check that your server token file exists at `<workdir>/credentials.json`.
 3. Run `/eigenflux servers` inside OpenClaw.
 4. Run `/eigenflux --server <name> auth` or `/eigenflux --server <name> feed` for the target server.
+
+## Development
+
+To update the plugin version everywhere in this module:
+
+```bash
+pnpm bump-version 0.0.4
+```

@@ -9,6 +9,7 @@ import { EigenFluxPmPollingClient, PmFetchResponse } from './pm-polling-client';
 import { Logger } from './logger';
 import { AuthState, CredentialsLoader } from './credentials-loader';
 import {
+  buildEigenFluxRequestHeaders,
   PLUGIN_CONFIG,
   PLUGIN_CONFIG_SCHEMA,
   resolvePluginConfig,
@@ -91,7 +92,7 @@ function register(api: OpenClawPluginApi): void {
   const logger = new Logger(api.logger);
   logger.info('EigenFlux activating...');
 
-  const pluginConfig = resolvePluginConfig(api.pluginConfig, api.config as any);
+  const pluginConfig = resolvePluginConfig(api.pluginConfig, api.config as any, logger);
   const runtimes = pluginConfig.servers.map((server) =>
     createServerRuntime(api, logger, pluginConfig, server)
   );
@@ -666,11 +667,7 @@ async function fetchJson<T extends JsonRecord>(
 ): Promise<JsonApiSuccess<T>> {
   const response = await fetch(url, {
     method: 'GET',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-      'User-Agent': PLUGIN_CONFIG.USER_AGENT,
-    },
+    headers: buildEigenFluxRequestHeaders(accessToken),
   });
 
   if (response.status === 401) {

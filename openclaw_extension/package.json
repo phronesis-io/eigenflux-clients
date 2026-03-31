@@ -1,6 +1,6 @@
 {
   "name": "@phronesis-io/openclaw-eigenflux",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "OpenClaw plugin for EigenFlux periodic polling delivery",
   "main": "dist/index.js",
   "files": [
@@ -11,6 +11,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "bump-version": "node scripts/set-version.mjs",
     "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc && echo success",
     "build:watch": "tsc --watch",
     "test": "jest --runInBand",

@@ -1,3 +1,4 @@
+import { PLUGIN_CONFIG } from './config';
 import { EigenFluxPollingClient } from './polling-client';
 import { Logger } from './logger';
 
@@ -12,6 +13,16 @@ function createLoggerSpies() {
 
 function createLogger(spies = createLoggerSpies()): Logger {
   return new Logger(spies);
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe('EigenFluxPollingClient', () => {
@@ -187,7 +198,7 @@ describe('EigenFluxPollingClient', () => {
     expect(onFeedPolled).not.toHaveBeenCalled();
   });
 
-  test('sends User-Agent header with plugin version', async () => {
+  test('sends plugin metadata headers on feed requests', async () => {
     const onFeedPolled = jest.fn().mockResolvedValue(undefined);
     const onAuthRequired = jest.fn().mockResolvedValue(undefined);
 
@@ -220,8 +231,10 @@ describe('EigenFluxPollingClient', () => {
 
     const fetchCall = (global.fetch as jest.Mock).mock.calls[0];
     const headers = fetchCall[1].headers;
-    expect(headers['User-Agent']).toContain('eigenflux-plugin');
     expect(headers['User-Agent']).toContain('node/');
+    expect(headers['User-Agent']).not.toContain('eigenflux-plugin');
+    expect(headers['X-Plugin-Ver']).toBe(PLUGIN_CONFIG.PLUGIN_VERSION);
+    expect(headers['X-Host-Kind']).toBe(PLUGIN_CONFIG.HOST_KIND);
   });
 
   test('logs detailed fetch failure diagnostics', async () => {
@@ -275,5 +288,51 @@ describe('EigenFluxPollingClient', () => {
     expect(loggerSpies.error).toHaveBeenCalledWith(
       expect.stringContaining('port=8080')
     );
+  });
+
+  test('does not re-enter feed polling while a previous poll is still running', async () => {
+    const loggerSpies = createLoggerSpies();
+    const responseDeferred = createDeferred<Response>();
+
+    global.fetch = jest.fn().mockReturnValue(responseDeferred.promise) as typeof fetch;
+
+    const client = new EigenFluxPollingClient({
+      apiUrl: 'http://127.0.0.1:8080',
+      getAuthState: () => ({
+        status: 'available',
+        accessToken: 'at_test_token',
+        source: 'file',
+        credentialsPath: '/tmp/eigenflux/credentials.json',
+      }),
+      pollIntervalSec: 60,
+      logger: createLogger(loggerSpies),
+      onFeedPolled: jest.fn().mockResolvedValue(undefined),
+      onAuthRequired: jest.fn().mockResolvedValue(undefined),
+    });
+
+    const firstPoll = client.pollOnce();
+    const secondPoll = client.pollOnce();
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(loggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '[EigenFlux] Skipping feed poll because a previous poll is still in progress'
+      )
+    );
+
+    responseDeferred.resolve(
+      new Response(
+        JSON.stringify({
+          code: 0,
+          msg: 'success',
+          data: { items: [], has_more: false, notifications: [] },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+
+    const [firstResult, secondResult] = await Promise.all([firstPoll, secondPoll]);
+    expect(firstResult).toEqual(secondResult);
+    expect(firstResult.kind).toBe('success');
   });
 });

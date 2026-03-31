@@ -6,7 +6,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-const PLUGIN_VERSION = '0.0.1-alpha.0';
+import { Logger } from './logger';
+
+const PLUGIN_VERSION = '0.0.3';
 const DEFAULT_SERVER_NAME = 'eigenflux';
 const DEFAULT_ENDPOINT = 'https://www.eigenflux.ai';
 const DEFAULT_GATEWAY_URL = 'ws://127.0.0.1:18789';
@@ -15,6 +17,9 @@ const DEFAULT_AGENT_ID = 'main';
 const DEFAULT_OPENCLAW_CLI_BIN = 'openclaw';
 const DEFAULT_POLL_INTERVAL_SEC = 300;
 const DEFAULT_PM_POLL_INTERVAL_SEC = 60;
+const MIN_POLL_INTERVAL_SEC = 10;
+const MAX_POLL_INTERVAL_SEC = 24 * 60 * 60;
+const HOST_KIND = 'openclaw';
 
 export type NotificationRouteOverrides = {
   sessionKey: boolean;
@@ -103,8 +108,6 @@ function buildUserAgent(): string {
     parts.push(`openclaw/${openclawVersion}`);
   }
 
-  parts.push(`eigenflux-plugin/${PLUGIN_VERSION}`);
-
   return parts.join(' ');
 }
 
@@ -131,6 +134,33 @@ function parsePositiveInteger(value: unknown, fallback: number): number {
     }
   }
   return fallback;
+}
+
+function parsePollingIntervalSeconds(
+  value: unknown,
+  fallback: number,
+  options: {
+    fieldName: 'pollInterval' | 'pmPollInterval';
+    serverName: string;
+    logger?: Logger;
+  }
+): number {
+  const parsed = parsePositiveInteger(value, fallback);
+  if (parsed < MIN_POLL_INTERVAL_SEC) {
+    options.logger?.warn(
+      `${options.fieldName} for server "${options.serverName}" is below ${MIN_POLL_INTERVAL_SEC}s; clamping to ${MIN_POLL_INTERVAL_SEC}s`
+    );
+    return MIN_POLL_INTERVAL_SEC;
+  }
+
+  if (parsed <= MAX_POLL_INTERVAL_SEC) {
+    return parsed;
+  }
+
+  options.logger?.warn(
+    `${options.fieldName} for server "${options.serverName}" exceeds ${MAX_POLL_INTERVAL_SEC}s; clamping to ${MAX_POLL_INTERVAL_SEC}s`
+  );
+  return MAX_POLL_INTERVAL_SEC;
 }
 
 function isSessionPeerShape(value: string | undefined): boolean {
@@ -223,7 +253,8 @@ function createServerName(baseName: string, usedNames: Set<string>): string {
 function resolveServerConfig(
   serverConfig: unknown,
   index: number,
-  usedNames: Set<string>
+  usedNames: Set<string>,
+  logger?: Logger
 ): ResolvedEigenFluxServerConfig {
   const normalized = isRecord(serverConfig) ? serverConfig : {};
   const rawName =
@@ -242,10 +273,19 @@ function resolveServerConfig(
     name,
     endpoint: readNonEmptyString(normalized.endpoint) ?? DEFAULT_ENDPOINT,
     workdir,
-    pollIntervalSec: parsePositiveInteger(normalized.pollInterval, DEFAULT_POLL_INTERVAL_SEC),
-    pmPollIntervalSec: parsePositiveInteger(
+    pollIntervalSec: parsePollingIntervalSeconds(normalized.pollInterval, DEFAULT_POLL_INTERVAL_SEC, {
+      fieldName: 'pollInterval',
+      serverName: name,
+      logger,
+    }),
+    pmPollIntervalSec: parsePollingIntervalSeconds(
       normalized.pmPollInterval,
-      DEFAULT_PM_POLL_INTERVAL_SEC
+      DEFAULT_PM_POLL_INTERVAL_SEC,
+      {
+        fieldName: 'pmPollInterval',
+        serverName: name,
+        logger,
+      }
     ),
     sessionKey,
     agentId: readNonEmptyString(normalized.agentId) ?? derivedRoute.agentId ?? DEFAULT_AGENT_ID,
@@ -289,7 +329,8 @@ export function resolveServerSkillPath(server: {
 
 export function resolvePluginConfig(
   pluginConfig: unknown,
-  globalConfig?: GlobalGatewayConfig
+  globalConfig?: GlobalGatewayConfig,
+  logger?: Logger
 ): ResolvedEigenFluxPluginConfig {
   const normalized = isRecord(pluginConfig) ? pluginConfig : {};
   const usedNames = new Set<string>();
@@ -302,7 +343,7 @@ export function resolvePluginConfig(
     openclawCliBin:
       readNonEmptyString(normalized.openclawCliBin) ?? DEFAULT_OPENCLAW_CLI_BIN,
     servers: normalizeServersInput(normalized).map((server, index) =>
-      resolveServerConfig(server, index, usedNames)
+      resolveServerConfig(server, index, usedNames, logger)
     ),
   };
 }
@@ -332,13 +373,15 @@ const SERVER_CONFIG_SCHEMA = {
     },
     pollInterval: {
       type: 'integer',
-      minimum: 1,
+      minimum: MIN_POLL_INTERVAL_SEC,
+      maximum: MAX_POLL_INTERVAL_SEC,
       description: 'Feed polling interval in seconds for this server',
       default: DEFAULT_POLL_INTERVAL_SEC,
     },
     pmPollInterval: {
       type: 'integer',
-      minimum: 1,
+      minimum: MIN_POLL_INTERVAL_SEC,
+      maximum: MAX_POLL_INTERVAL_SEC,
       description: 'Private message polling interval in seconds for this server',
       default: DEFAULT_PM_POLL_INTERVAL_SEC,
     },
@@ -376,10 +419,23 @@ export const PLUGIN_CONFIG = {
   DEFAULT_OPENCLAW_CLI_BIN,
   DEFAULT_POLL_INTERVAL_SEC,
   DEFAULT_PM_POLL_INTERVAL_SEC,
+  MIN_POLL_INTERVAL_SEC,
+  MAX_POLL_INTERVAL_SEC,
+  HOST_KIND,
   CREDENTIALS_FILE: 'credentials.json',
   PLUGIN_VERSION,
   USER_AGENT: buildUserAgent(),
 } as const;
+
+export function buildEigenFluxRequestHeaders(accessToken: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+    'User-Agent': PLUGIN_CONFIG.USER_AGENT,
+    'X-Plugin-Ver': PLUGIN_CONFIG.PLUGIN_VERSION,
+    'X-Host-Kind': PLUGIN_CONFIG.HOST_KIND,
+  };
+}
 
 export const PLUGIN_CONFIG_SCHEMA = {
   type: 'object',
