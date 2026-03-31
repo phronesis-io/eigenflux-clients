@@ -4,17 +4,14 @@ import * as path from 'path';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 
-jest.mock(
-  'openclaw/plugin-sdk',
-  () => ({
-    emptyPluginConfigSchema: () => ({
-      type: 'object',
-      additionalProperties: false,
-      properties: {},
-    }),
-  }),
-  { virtual: true }
-);
+const packageManifest = require('../package.json') as { version: string };
+
+function readHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
 
 function waitFor(condition: () => boolean, timeoutMs = 8000): Promise<void> {
   const startedAt = Date.now();
@@ -34,18 +31,17 @@ function waitFor(condition: () => boolean, timeoutMs = 8000): Promise<void> {
 }
 
 describe('register integration', () => {
-  let originalApiUrl: string | undefined;
-  let originalOpenClawHome: string | undefined;
-  let originalGatewayUrl: string | undefined;
-  let originalGatewayToken: string | undefined;
-  let originalPollInterval: string | undefined;
-  let openClawHome: string;
+  let homeDir: string;
+  let originalHome: string | undefined;
+  let workdir: string;
 
   let apiHttpServer: http.Server;
   let apiPort: number;
   let apiRequestCount: number;
   let apiAuthHeader: string | undefined;
   let apiUserAgentHeader: string | undefined;
+  let apiPluginVersionHeader: string | undefined;
+  let apiHostKindHeader: string | undefined;
   let apiFeedItems: Array<{
     item_id: string;
     group_id?: string;
@@ -58,20 +54,12 @@ describe('register integration', () => {
   let gatewayPort: number;
 
   beforeEach(async () => {
-    originalApiUrl = process.env.EIGENFLUX_API_URL;
-    originalOpenClawHome = process.env.OPENCLAW_HOME;
-    originalGatewayUrl = process.env.EIGENFLUX_OPENCLAW_GATEWAY_URL;
-    originalGatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
-    originalPollInterval = process.env.EIGENFLUX_POLL_INTERVAL;
-
-    openClawHome = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-home-'));
-    process.env.OPENCLAW_HOME = openClawHome;
-    process.env.EIGENFLUX_POLL_INTERVAL = '60';
-
-    const credentialsDir = path.join(openClawHome, 'eigenflux');
-    fs.mkdirSync(credentialsDir, { recursive: true });
+    originalHome = process.env.HOME;
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-home-'));
+    process.env.HOME = homeDir;
+    workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-workdir-'));
     fs.writeFileSync(
-      path.join(credentialsDir, 'credentials.json'),
+      path.join(workdir, 'credentials.json'),
       JSON.stringify({ access_token: 'at_integration_token' }),
       'utf-8'
     );
@@ -79,6 +67,8 @@ describe('register integration', () => {
     apiRequestCount = 0;
     apiAuthHeader = undefined;
     apiUserAgentHeader = undefined;
+    apiPluginVersionHeader = undefined;
+    apiHostKindHeader = undefined;
     apiFeedItems = [
       {
         item_id: '501',
@@ -92,6 +82,8 @@ describe('register integration', () => {
         apiRequestCount++;
         apiAuthHeader = req.headers.authorization;
         apiUserAgentHeader = req.headers['user-agent'];
+        apiPluginVersionHeader = readHeaderValue(req.headers['x-plugin-ver']);
+        apiHostKindHeader = readHeaderValue(req.headers['x-host-kind']);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
@@ -113,7 +105,6 @@ describe('register integration', () => {
     await new Promise<void>((resolve) => {
       apiHttpServer.listen(0, '127.0.0.1', () => {
         apiPort = (apiHttpServer.address() as any).port;
-        process.env.EIGENFLUX_API_URL = `http://127.0.0.1:${apiPort}`;
         resolve();
       });
     });
@@ -123,52 +114,38 @@ describe('register integration', () => {
     await new Promise<void>((resolve) => {
       gatewayHttpServer.listen(0, '127.0.0.1', () => {
         gatewayPort = (gatewayHttpServer.address() as any).port;
-        process.env.EIGENFLUX_OPENCLAW_GATEWAY_URL = `ws://127.0.0.1:${gatewayPort}`;
-        process.env.OPENCLAW_GATEWAY_TOKEN = 'gw_test_token';
         resolve();
       });
     });
   });
 
   afterEach(async () => {
-    if (originalApiUrl === undefined) {
-      delete process.env.EIGENFLUX_API_URL;
+    if (originalHome === undefined) {
+      delete process.env.HOME;
     } else {
-      process.env.EIGENFLUX_API_URL = originalApiUrl;
+      process.env.HOME = originalHome;
     }
-    if (originalOpenClawHome === undefined) {
-      delete process.env.OPENCLAW_HOME;
-    } else {
-      process.env.OPENCLAW_HOME = originalOpenClawHome;
-    }
-    if (originalGatewayUrl === undefined) {
-      delete process.env.EIGENFLUX_OPENCLAW_GATEWAY_URL;
-    } else {
-      process.env.EIGENFLUX_OPENCLAW_GATEWAY_URL = originalGatewayUrl;
-    }
-    if (originalGatewayToken === undefined) {
-      delete process.env.OPENCLAW_GATEWAY_TOKEN;
-    } else {
-      process.env.OPENCLAW_GATEWAY_TOKEN = originalGatewayToken;
-    }
-    if (originalPollInterval === undefined) {
-      delete process.env.EIGENFLUX_POLL_INTERVAL;
-    } else {
-      process.env.EIGENFLUX_POLL_INTERVAL = originalPollInterval;
-    }
-
-    fs.rmSync(openClawHome, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(workdir, { recursive: true, force: true });
     await new Promise<void>((resolve) => apiHttpServer.close(() => resolve()));
     await new Promise<void>((resolve) => gatewayWss.close(() => resolve()));
     await new Promise<void>((resolve) => gatewayHttpServer.close(() => resolve()));
   });
 
-  test('dispatches ACP chat.send when polling feed returns new items', async () => {
+  test('falls back to gateway rpc agent when polling feed returns new items', async () => {
     jest.resetModules();
+    const sessionStorePath = path.join(
+      homeDir,
+      '.openclaw',
+      'agents',
+      'main',
+      'sessions',
+      'sessions.json'
+    );
     const { default: plugin } = await import('./index');
     const services: any[] = [];
     const gatewayMethods: string[] = [];
-    const chatSendParams: any[] = [];
+    const agentParams: any[] = [];
 
     gatewayWss.on('connection', (socket) => {
       socket.send(
@@ -197,7 +174,7 @@ describe('register integration', () => {
                 type: 'hello-ok',
                 protocol: 3,
                 server: { version: 'test', connId: 'conn-test' },
-                features: { methods: ['sessions.list', 'chat.send'], events: [] },
+                features: { methods: ['agent'], events: [] },
                 snapshot: { ts: Date.now() },
                 policy: { maxPayload: 1000000, maxBufferedBytes: 1000000, tickIntervalMs: 30000 },
               },
@@ -206,22 +183,8 @@ describe('register integration', () => {
           return;
         }
 
-        if (frame.method === 'sessions.list') {
-          socket.send(
-            JSON.stringify({
-              type: 'res',
-              id: frame.id,
-              ok: true,
-              payload: {
-                sessions: [{ key: 'main' }],
-              },
-            })
-          );
-          return;
-        }
-
-        if (frame.method === 'chat.send') {
-          chatSendParams.push(frame.params);
+        if (frame.method === 'agent') {
+          agentParams.push(frame.params);
           socket.send(
             JSON.stringify({
               type: 'res',
@@ -239,13 +202,25 @@ describe('register integration', () => {
 
     plugin.register({
       config: {
-        enabled: true,
         gateway: {
           auth: {
             token: 'gw_test_token',
           },
         },
       },
+      pluginConfig: {
+        gatewayUrl: `ws://127.0.0.1:${gatewayPort}`,
+        servers: [
+          {
+            name: 'eigenflux',
+            endpoint: `http://127.0.0.1:${apiPort}`,
+            workdir,
+            pollInterval: 60,
+            sessionStorePath,
+          },
+        ],
+      },
+      runtime: {},
       logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
       registerService: (service: any) => {
         services.push(service);
@@ -254,29 +229,40 @@ describe('register integration', () => {
 
     expect(services).toHaveLength(1);
     await services[0].start();
-    await waitFor(() => chatSendParams.length === 1);
+    await waitFor(() => agentParams.length === 1);
 
     expect(apiRequestCount).toBeGreaterThanOrEqual(1);
     expect(apiAuthHeader).toBe('Bearer at_integration_token');
-    expect(apiUserAgentHeader).toContain('eigenflux-plugin');
     expect(apiUserAgentHeader).toContain('node/');
-    expect(gatewayMethods).toEqual(['connect', 'sessions.list', 'chat.send']);
-    expect(chatSendParams[0]).toEqual(
+    expect(apiUserAgentHeader).not.toContain('eigenflux-plugin');
+    expect(apiPluginVersionHeader).toBe(packageManifest.version);
+    expect(apiHostKindHeader).toBe('openclaw');
+    expect(gatewayMethods).toEqual(['connect', 'agent']);
+    expect(agentParams[0]).toEqual(
       expect.objectContaining({
+        agentId: 'main',
         sessionKey: 'main',
         message: expect.stringContaining('[EIGENFLUX_FEED_PAYLOAD]'),
+        deliver: true,
       })
     );
-    expect(String(chatSendParams[0].message)).toContain('"item_id": "501"');
-    expect(String(chatSendParams[0].message)).toContain('"group_id": "group-int-1"');
-    expect(String(chatSendParams[0].message)).toContain('submit feedback scores');
-    expect(typeof chatSendParams[0].idempotencyKey).toBe('string');
-    expect(chatSendParams[0].idempotencyKey.length).toBeGreaterThan(0);
+    expect(String(agentParams[0].message)).toContain('"item_id": "501"');
+    expect(String(agentParams[0].message)).toContain('"group_id": "group-int-1"');
+    expect(String(agentParams[0].message)).toContain('network=eigenflux');
+    expect(String(agentParams[0].message)).toContain(`workdir=${workdir}`);
+    expect(String(agentParams[0].message)).toContain(
+      `skill_file=http://127.0.0.1:${apiPort}/skill.md`
+    );
+    expect(String(agentParams[0].message)).toContain(
+      'submit the corresponding feedback scores through the normal EigenFlux workflow'
+    );
+    expect(typeof agentParams[0].idempotencyKey).toBe('string');
+    expect(agentParams[0].idempotencyKey.length).toBeGreaterThan(0);
 
     await services[0].stop();
   });
 
-  test('dispatches the entire feed payload in a single ACP message', async () => {
+  test('dispatches the entire feed payload in a single gateway agent message', async () => {
     apiFeedItems = [
       {
         item_id: '601',
@@ -293,9 +279,17 @@ describe('register integration', () => {
     ];
 
     jest.resetModules();
+    const sessionStorePath = path.join(
+      homeDir,
+      '.openclaw',
+      'agents',
+      'main',
+      'sessions',
+      'sessions.json'
+    );
     const { default: plugin } = await import('./index');
     const services: any[] = [];
-    const chatSendParams: any[] = [];
+    const agentParams: any[] = [];
 
     gatewayWss.on('connection', (socket) => {
       socket.send(
@@ -322,7 +316,7 @@ describe('register integration', () => {
                 type: 'hello-ok',
                 protocol: 3,
                 server: { version: 'test', connId: 'conn-dup' },
-                features: { methods: ['sessions.list', 'chat.send'], events: [] },
+                features: { methods: ['agent'], events: [] },
                 snapshot: { ts: Date.now() },
                 policy: { maxPayload: 1000000, maxBufferedBytes: 1000000, tickIntervalMs: 30000 },
               },
@@ -331,29 +325,15 @@ describe('register integration', () => {
           return;
         }
 
-        if (frame.method === 'sessions.list') {
+        if (frame.method === 'agent') {
+          agentParams.push(frame.params);
           socket.send(
             JSON.stringify({
               type: 'res',
               id: frame.id,
               ok: true,
               payload: {
-                sessions: [{ key: 'main' }],
-              },
-            })
-          );
-          return;
-        }
-
-        if (frame.method === 'chat.send') {
-          chatSendParams.push(frame.params);
-          socket.send(
-            JSON.stringify({
-              type: 'res',
-              id: frame.id,
-              ok: true,
-              payload: {
-                runId: `run-dup-${chatSendParams.length}`,
+                runId: `run-dup-${agentParams.length}`,
                 status: 'started',
               },
             })
@@ -364,11 +344,90 @@ describe('register integration', () => {
 
     plugin.register({
       config: {
-        enabled: true,
         gateway: {
           auth: {
             token: 'gw_test_token',
           },
+        },
+      },
+      pluginConfig: {
+        gatewayUrl: `ws://127.0.0.1:${gatewayPort}`,
+        servers: [
+          {
+            name: 'eigenflux',
+            endpoint: `http://127.0.0.1:${apiPort}`,
+            workdir,
+            pollInterval: 60,
+            sessionStorePath,
+          },
+        ],
+      },
+      runtime: {},
+      logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+      registerService: (service: any) => {
+        services.push(service);
+      },
+    } as any);
+
+    expect(services).toHaveLength(1);
+    await services[0].start();
+    await waitFor(() => agentParams.length === 1);
+
+    expect(agentParams).toHaveLength(1);
+    expect(String(agentParams[0].message)).toContain('"item_id": "601"');
+    expect(String(agentParams[0].message)).toContain('"item_id": "602"');
+    expect(String(agentParams[0].message)).toContain('"group_id": "group-dup-1"');
+
+    await services[0].stop();
+  });
+
+  test('routes mocked feed notifications to the freshest external session for runtime.subagent', async () => {
+    jest.resetModules();
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-home-'));
+    const sessionStoreDir = path.join(homeDir, '.openclaw', 'agents', 'main', 'sessions');
+    fs.mkdirSync(sessionStoreDir, { recursive: true });
+    const sessionStorePath = path.join(sessionStoreDir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 100,
+          deliveryContext: {
+            channel: 'webchat',
+          },
+        },
+        'agent:main:feishu:direct:ou_feed_target': {
+          updatedAt: 200,
+          deliveryContext: {
+            channel: 'feishu',
+            to: 'user:ou_feed_target',
+            accountId: 'default',
+          },
+        },
+      }),
+      'utf-8'
+    );
+
+    const { default: plugin } = await import('./index');
+    const services: any[] = [];
+    const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-subagent-feed' });
+
+    plugin.register({
+      config: {},
+      pluginConfig: {
+        servers: [
+          {
+            name: 'eigenflux',
+            endpoint: `http://127.0.0.1:${apiPort}`,
+            workdir,
+            pollInterval: 60,
+            sessionStorePath,
+          },
+        ],
+      },
+      runtime: {
+        subagent: {
+          run: subagentRun,
         },
       },
       logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -379,13 +438,17 @@ describe('register integration', () => {
 
     expect(services).toHaveLength(1);
     await services[0].start();
-    await waitFor(() => chatSendParams.length === 1);
+    await waitFor(() => subagentRun.mock.calls.length === 1);
 
-    expect(chatSendParams).toHaveLength(1);
-    expect(String(chatSendParams[0].message)).toContain('"item_id": "601"');
-    expect(String(chatSendParams[0].message)).toContain('"item_id": "602"');
-    expect(String(chatSendParams[0].message)).toContain('"group_id": "group-dup-1"');
+    expect(subagentRun).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:feishu:direct:ou_feed_target',
+      message: expect.stringContaining('[EIGENFLUX_FEED_PAYLOAD]'),
+      deliver: true,
+      idempotencyKey: expect.any(String),
+    });
+    expect(String(subagentRun.mock.calls[0]?.[0]?.message)).toContain('"item_id": "501"');
 
     await services[0].stop();
+    fs.rmSync(homeDir, { recursive: true, force: true });
   });
 });

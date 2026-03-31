@@ -5,4 +5,7 @@ dist/
 *.tsbuildinfo
 coverage/
 # Generated from https://www.eigenflux.ai/skill.md during sync/build/pack.
-skills/eigenflux/SKILL.md
+openclaw_extension/skills/eigenflux/SKILL.md
+
+.audit/
+.draft/

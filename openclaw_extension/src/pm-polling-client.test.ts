@@ -1,5 +1,5 @@
 import { PLUGIN_CONFIG } from './config';
-import { EigenFluxPollingClient } from './polling-client';
+import { EigenFluxPmPollingClient } from './pm-polling-client';
 import { Logger } from './logger';
 
 function createLoggerSpies() {
@@ -25,7 +25,7 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
-describe('EigenFluxPollingClient', () => {
+describe('EigenFluxPmPollingClient', () => {
   const originalFetch = global.fetch;
 
   afterEach(() => {
@@ -33,8 +33,8 @@ describe('EigenFluxPollingClient', () => {
     jest.restoreAllMocks();
   });
 
-  test('polls feed and forwards the full payload to callback', async () => {
-    const onFeedPolled = jest.fn().mockResolvedValue(undefined);
+  test('polls PM and forwards the full payload to callback', async () => {
+    const onPmFetched = jest.fn().mockResolvedValue(undefined);
     const onAuthRequired = jest.fn().mockResolvedValue(undefined);
 
     global.fetch = jest.fn().mockResolvedValue(
@@ -43,22 +43,13 @@ describe('EigenFluxPollingClient', () => {
           code: 0,
           msg: 'success',
           data: {
-            items: [
+            messages: [
               {
-                item_id: 'item-101',
-                group_id: 'group-101',
-                summary: 'Important signal',
-                broadcast_type: 'info',
-                updated_at: 1760000000000,
-              },
-            ],
-            has_more: false,
-            notifications: [
-              {
-                notification_id: 'notif-1',
-                type: 'system',
-                content: 'Feed refreshed successfully',
-                created_at: 1760000000100,
+                message_id: 'msg-101',
+                from_agent_id: 'agent-42',
+                conversation_id: 'conv-1',
+                content: 'Hello from agent',
+                created_at: 1760000000000,
               },
             ],
           },
@@ -72,7 +63,7 @@ describe('EigenFluxPollingClient', () => {
       )
     ) as typeof fetch;
 
-    const client = new EigenFluxPollingClient({
+    const client = new EigenFluxPmPollingClient({
       apiUrl: 'http://127.0.0.1:8080',
       getAuthState: () => ({
         status: 'available',
@@ -82,7 +73,7 @@ describe('EigenFluxPollingClient', () => {
       }),
       pollIntervalSec: 60,
       logger: createLogger(),
-      onFeedPolled,
+      onPmFetched,
       onAuthRequired,
     });
 
@@ -93,19 +84,14 @@ describe('EigenFluxPollingClient', () => {
         kind: 'success',
       })
     );
-    expect(onFeedPolled).toHaveBeenCalledWith(
+    expect(onPmFetched).toHaveBeenCalledWith(
       expect.objectContaining({
         code: 0,
         data: expect.objectContaining({
-          items: [
+          messages: [
             expect.objectContaining({
-              item_id: 'item-101',
-              summary: 'Important signal',
-            }),
-          ],
-          notifications: [
-            expect.objectContaining({
-              notification_id: 'notif-1',
+              message_id: 'msg-101',
+              content: 'Hello from agent',
             }),
           ],
         }),
@@ -114,11 +100,47 @@ describe('EigenFluxPollingClient', () => {
     expect(onAuthRequired).not.toHaveBeenCalled();
   });
 
-  test('emits auth-required callback when token is missing', async () => {
-    const onFeedPolled = jest.fn().mockResolvedValue(undefined);
+  test('does not invoke callback when messages array is empty', async () => {
+    const onPmFetched = jest.fn().mockResolvedValue(undefined);
     const onAuthRequired = jest.fn().mockResolvedValue(undefined);
 
-    const client = new EigenFluxPollingClient({
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: 0,
+          msg: 'success',
+          data: { messages: [] },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    ) as typeof fetch;
+
+    const client = new EigenFluxPmPollingClient({
+      apiUrl: 'http://127.0.0.1:8080',
+      getAuthState: () => ({
+        status: 'available',
+        accessToken: 'at_test_token',
+        source: 'file',
+        credentialsPath: '/tmp/eigenflux/credentials.json',
+      }),
+      pollIntervalSec: 60,
+      logger: createLogger(),
+      onPmFetched,
+      onAuthRequired,
+    });
+
+    const result = await client.pollOnce();
+
+    expect(result.kind).toBe('success');
+    expect(onPmFetched).not.toHaveBeenCalled();
+    expect(onAuthRequired).not.toHaveBeenCalled();
+  });
+
+  test('emits auth-required callback when token is missing', async () => {
+    const onPmFetched = jest.fn().mockResolvedValue(undefined);
+    const onAuthRequired = jest.fn().mockResolvedValue(undefined);
+
+    const client = new EigenFluxPmPollingClient({
       apiUrl: 'http://127.0.0.1:8080',
       getAuthState: () => ({
         status: 'missing',
@@ -126,7 +148,7 @@ describe('EigenFluxPollingClient', () => {
       }),
       pollIntervalSec: 60,
       logger: createLogger(),
-      onFeedPolled,
+      onPmFetched,
       onAuthRequired,
     });
 
@@ -147,12 +169,50 @@ describe('EigenFluxPollingClient', () => {
       source: undefined,
       expiresAt: undefined,
     });
-    expect(onFeedPolled).not.toHaveBeenCalled();
+    expect(onPmFetched).not.toHaveBeenCalled();
     expect(global.fetch).toBe(originalFetch);
   });
 
-  test('emits auth-required callback when feed returns 401', async () => {
-    const onFeedPolled = jest.fn().mockResolvedValue(undefined);
+  test('emits auth-required callback when token is expired', async () => {
+    const onPmFetched = jest.fn().mockResolvedValue(undefined);
+    const onAuthRequired = jest.fn().mockResolvedValue(undefined);
+
+    const client = new EigenFluxPmPollingClient({
+      apiUrl: 'http://127.0.0.1:8080',
+      getAuthState: () => ({
+        status: 'expired',
+        credentialsPath: '/tmp/eigenflux/credentials.json',
+        source: 'file',
+        expiresAt: 1700000000000,
+      }),
+      pollIntervalSec: 60,
+      logger: createLogger(),
+      onPmFetched,
+      onAuthRequired,
+    });
+
+    const result = await client.pollOnce();
+
+    expect(result).toEqual({
+      kind: 'auth_required',
+      authEvent: {
+        reason: 'expired_token',
+        credentialsPath: '/tmp/eigenflux/credentials.json',
+        source: 'file',
+        expiresAt: 1700000000000,
+      },
+    });
+    expect(onAuthRequired).toHaveBeenCalledWith({
+      reason: 'expired_token',
+      credentialsPath: '/tmp/eigenflux/credentials.json',
+      source: 'file',
+      expiresAt: 1700000000000,
+    });
+    expect(onPmFetched).not.toHaveBeenCalled();
+  });
+
+  test('emits auth-required callback when PM fetch returns 401', async () => {
+    const onPmFetched = jest.fn().mockResolvedValue(undefined);
     const onAuthRequired = jest.fn().mockResolvedValue(undefined);
 
     global.fetch = jest.fn().mockResolvedValue(
@@ -162,7 +222,7 @@ describe('EigenFluxPollingClient', () => {
       })
     ) as typeof fetch;
 
-    const client = new EigenFluxPollingClient({
+    const client = new EigenFluxPmPollingClient({
       apiUrl: 'http://127.0.0.1:8080',
       getAuthState: () => ({
         status: 'available',
@@ -172,7 +232,7 @@ describe('EigenFluxPollingClient', () => {
       }),
       pollIntervalSec: 60,
       logger: createLogger(),
-      onFeedPolled,
+      onPmFetched,
       onAuthRequired,
     });
 
@@ -195,11 +255,11 @@ describe('EigenFluxPollingClient', () => {
       expiresAt: undefined,
       statusCode: 401,
     });
-    expect(onFeedPolled).not.toHaveBeenCalled();
+    expect(onPmFetched).not.toHaveBeenCalled();
   });
 
-  test('sends plugin metadata headers on feed requests', async () => {
-    const onFeedPolled = jest.fn().mockResolvedValue(undefined);
+  test('sends plugin metadata headers on PM requests', async () => {
+    const onPmFetched = jest.fn().mockResolvedValue(undefined);
     const onAuthRequired = jest.fn().mockResolvedValue(undefined);
 
     global.fetch = jest.fn().mockResolvedValue(
@@ -207,13 +267,13 @@ describe('EigenFluxPollingClient', () => {
         JSON.stringify({
           code: 0,
           msg: 'success',
-          data: { items: [], has_more: false, notifications: [] },
+          data: { messages: [] },
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       )
     ) as typeof fetch;
 
-    const client = new EigenFluxPollingClient({
+    const client = new EigenFluxPmPollingClient({
       apiUrl: 'http://127.0.0.1:8080',
       getAuthState: () => ({
         status: 'available',
@@ -223,7 +283,7 @@ describe('EigenFluxPollingClient', () => {
       }),
       pollIntervalSec: 60,
       logger: createLogger(),
-      onFeedPolled,
+      onPmFetched,
       onAuthRequired,
     });
 
@@ -254,7 +314,7 @@ describe('EigenFluxPollingClient', () => {
       Object.assign(new TypeError('fetch failed'), { cause: networkCause })
     ) as typeof fetch;
 
-    const client = new EigenFluxPollingClient({
+    const client = new EigenFluxPmPollingClient({
       apiUrl: 'http://127.0.0.1:8080',
       getAuthState: () => ({
         status: 'available',
@@ -264,7 +324,7 @@ describe('EigenFluxPollingClient', () => {
       }),
       pollIntervalSec: 60,
       logger: createLogger(loggerSpies),
-      onFeedPolled: jest.fn().mockResolvedValue(undefined),
+      onPmFetched: jest.fn().mockResolvedValue(undefined),
       onAuthRequired: jest.fn().mockResolvedValue(undefined),
     });
 
@@ -273,7 +333,7 @@ describe('EigenFluxPollingClient', () => {
     expect(result.kind).toBe('error');
     expect(loggerSpies.error).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[EigenFlux] Failed to poll feed (url=http://127.0.0.1:8080/api/v1/items/feed?action=refresh&limit=20): TypeError: fetch failed'
+        '[EigenFlux] Failed to poll PM (url=http://127.0.0.1:8080/api/v1/pm/fetch): TypeError: fetch failed'
       )
     );
     expect(loggerSpies.error).toHaveBeenCalledWith(
@@ -290,13 +350,21 @@ describe('EigenFluxPollingClient', () => {
     );
   });
 
-  test('does not re-enter feed polling while a previous poll is still running', async () => {
+  test('start and stop lifecycle', async () => {
     const loggerSpies = createLoggerSpies();
-    const responseDeferred = createDeferred<Response>();
 
-    global.fetch = jest.fn().mockReturnValue(responseDeferred.promise) as typeof fetch;
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: 0,
+          msg: 'success',
+          data: { messages: [] },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    ) as typeof fetch;
 
-    const client = new EigenFluxPollingClient({
+    const client = new EigenFluxPmPollingClient({
       apiUrl: 'http://127.0.0.1:8080',
       getAuthState: () => ({
         status: 'available',
@@ -306,7 +374,50 @@ describe('EigenFluxPollingClient', () => {
       }),
       pollIntervalSec: 60,
       logger: createLogger(loggerSpies),
-      onFeedPolled: jest.fn().mockResolvedValue(undefined),
+      onPmFetched: jest.fn().mockResolvedValue(undefined),
+      onAuthRequired: jest.fn().mockResolvedValue(undefined),
+    });
+
+    await client.start();
+
+    expect(loggerSpies.info).toHaveBeenCalledWith(
+      expect.stringContaining('Starting PM polling client')
+    );
+    // Initial poll should have fired
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    // Starting again should warn
+    await client.start();
+    expect(loggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('PM polling client already running')
+    );
+
+    client.stop();
+    expect(loggerSpies.info).toHaveBeenCalledWith(
+      expect.stringContaining('Stopping PM polling client')
+    );
+
+    // Stopping again should be a no-op
+    client.stop();
+  });
+
+  test('does not re-enter PM polling while a previous poll is still running', async () => {
+    const loggerSpies = createLoggerSpies();
+    const responseDeferred = createDeferred<Response>();
+
+    global.fetch = jest.fn().mockReturnValue(responseDeferred.promise) as typeof fetch;
+
+    const client = new EigenFluxPmPollingClient({
+      apiUrl: 'http://127.0.0.1:8080',
+      getAuthState: () => ({
+        status: 'available',
+        accessToken: 'at_test_token',
+        source: 'file',
+        credentialsPath: '/tmp/eigenflux/credentials.json',
+      }),
+      pollIntervalSec: 60,
+      logger: createLogger(loggerSpies),
+      onPmFetched: jest.fn().mockResolvedValue(undefined),
       onAuthRequired: jest.fn().mockResolvedValue(undefined),
     });
 
@@ -316,7 +427,7 @@ describe('EigenFluxPollingClient', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(loggerSpies.warn).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[EigenFlux] Skipping feed poll because a previous poll is still in progress'
+        '[EigenFlux] Skipping PM poll because a previous poll is still in progress'
       )
     );
 
@@ -325,7 +436,7 @@ describe('EigenFluxPollingClient', () => {
         JSON.stringify({
           code: 0,
           msg: 'success',
-          data: { items: [], has_more: false, notifications: [] },
+          data: { messages: [] },
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       )

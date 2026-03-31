@@ -1,61 +1,41 @@
 /**
- * Polling client for EigenFlux feed updates
+ * Polling client for EigenFlux private message updates
  */
 
 import { AuthState } from './credentials-loader';
 import { buildEigenFluxRequestHeaders } from './config';
 import { Logger } from './logger';
+import { AuthRequiredEvent, PollOnceOptions } from './polling-client';
 
-export interface FeedItem {
-  item_id: string;
-  summary?: string;
-  broadcast_type: string;
-  domains?: string[];
-  keywords?: string[];
-  group_id?: string;
-  source_type?: string;
-  url?: string;
-  updated_at: number;
-}
-
-export interface FeedNotification {
-  notification_id: string;
-  type: string;
+export interface PmMessage {
+  message_id: string;
+  from_agent_id: string;
+  conversation_id: string;
   content: string;
   created_at: number;
 }
 
-export interface FeedResponse {
+export interface PmFetchResponse {
   code: number;
   msg: string;
   data: {
-    items: FeedItem[];
-    has_more: boolean;
-    notifications: FeedNotification[];
+    messages: PmMessage[];
   };
 }
 
-export interface PollingClientConfig {
+export interface PmPollingClientConfig {
   apiUrl: string;
   getAuthState: () => AuthState;
   pollIntervalSec: number;
   logger: Logger;
-  onFeedPolled: (payload: FeedResponse) => Promise<void>;
+  onPmFetched: (payload: PmFetchResponse) => Promise<void>;
   onAuthRequired: (event: AuthRequiredEvent) => Promise<void>;
 }
 
-export interface AuthRequiredEvent {
-  reason: 'missing_token' | 'expired_token' | 'unauthorized';
-  credentialsPath: string;
-  source?: 'file';
-  expiresAt?: number;
-  statusCode?: number;
-}
-
-export type PollResult =
+export type PmPollResult =
   | {
       kind: 'success';
-      payload: FeedResponse;
+      payload: PmFetchResponse;
     }
   | {
       kind: 'auth_required';
@@ -66,30 +46,25 @@ export type PollResult =
       error: Error;
     };
 
-export interface PollOnceOptions {
-  notifyFeed?: boolean;
-  notifyAuthRequired?: boolean;
-}
-
-export class EigenFluxPollingClient {
-  private config: PollingClientConfig;
+export class EigenFluxPmPollingClient {
+  private config: PmPollingClientConfig;
   private intervalId: NodeJS.Timeout | null = null;
   private isRunning = false;
-  private activePoll: Promise<PollResult> | null = null;
+  private activePoll: Promise<PmPollResult> | null = null;
 
-  constructor(config: PollingClientConfig) {
+  constructor(config: PmPollingClientConfig) {
     this.config = config;
   }
 
   async start(): Promise<void> {
     if (this.isRunning) {
-      this.config.logger.warn('Polling client already running');
+      this.config.logger.warn('PM polling client already running');
       return;
     }
 
     this.isRunning = true;
     this.config.logger.info(
-      `Starting polling client (interval: ${this.config.pollIntervalSec}s)`
+      `Starting PM polling client (interval: ${this.config.pollIntervalSec}s)`
     );
 
     // Initial fetch
@@ -98,7 +73,7 @@ export class EigenFluxPollingClient {
     // Schedule periodic polling
     this.intervalId = setInterval(() => {
       this.pollOnce().catch((err) => {
-        this.config.logger.error(`Polling error: ${this.formatError(err)}`);
+        this.config.logger.error(`PM polling error: ${this.formatError(err)}`);
       });
     }, this.config.pollIntervalSec * 1000);
   }
@@ -108,7 +83,7 @@ export class EigenFluxPollingClient {
       return;
     }
 
-    this.config.logger.info('Stopping polling client');
+    this.config.logger.info('Stopping PM polling client');
     this.isRunning = false;
 
     if (this.intervalId) {
@@ -117,19 +92,19 @@ export class EigenFluxPollingClient {
     }
   }
 
-  async pollOnce(options: PollOnceOptions = {}): Promise<PollResult> {
+  async pollOnce(options: PollOnceOptions = {}): Promise<PmPollResult> {
     if (this.activePoll) {
-      this.config.logger.warn('Skipping feed poll because a previous poll is still in progress');
+      this.config.logger.warn('Skipping PM poll because a previous poll is still in progress');
       return this.activePoll;
     }
 
-    const run = async (): Promise<PollResult> => {
+    const run = async (): Promise<PmPollResult> => {
       const notifyFeed = options.notifyFeed ?? true;
       const notifyAuthRequired = options.notifyAuthRequired ?? true;
       const authState = this.config.getAuthState();
       if (authState.status !== 'available') {
         this.config.logger.warn(
-          `No usable access token available (status=${authState.status}), skipping poll`
+          `No usable access token available (status=${authState.status}), skipping PM poll`
         );
         const authEvent: AuthRequiredEvent = {
           reason: authState.status === 'expired' ? 'expired_token' : 'missing_token',
@@ -146,10 +121,10 @@ export class EigenFluxPollingClient {
         };
       }
 
-      const url = `${this.config.apiUrl}/api/v1/items/feed?action=refresh&limit=20`;
+      const url = `${this.config.apiUrl}/api/v1/pm/fetch`;
 
       try {
-        this.config.logger.info(`Polling feed request: ${url}`);
+        this.config.logger.info(`Polling PM request: ${url}`);
         this.config.logger.debug(`Polling: ${url}`);
 
         const response = await fetch(url, {
@@ -178,20 +153,17 @@ export class EigenFluxPollingClient {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
-        const data = (await response.json()) as FeedResponse;
+        const data = (await response.json()) as PmFetchResponse;
 
         if (data.code !== 0) {
           throw new Error(`API error: ${data.msg}`);
         }
 
-        const items = data.data.items ?? [];
-        const notifications = data.data.notifications ?? [];
-        this.config.logger.info(
-          `Polled feed: ${items.length} items, notifications=${notifications.length}, has_more=${data.data.has_more}`
-        );
+        const messages = data.data.messages ?? [];
+        this.config.logger.info(`Polled PM: ${messages.length} messages`);
 
-        if (notifyFeed && (items.length > 0 || notifications.length > 0)) {
-          await this.config.onFeedPolled(data);
+        if (notifyFeed && messages.length > 0) {
+          await this.config.onPmFetched(data);
         }
         return {
           kind: 'success',
@@ -200,7 +172,7 @@ export class EigenFluxPollingClient {
       } catch (error) {
         const normalized = error instanceof Error ? error : new Error(String(error));
         this.config.logger.error(
-          `Failed to poll feed (url=${url}): ${this.formatError(normalized)}`
+          `Failed to poll PM (url=${url}): ${this.formatError(normalized)}`
         );
         return {
           kind: 'error',

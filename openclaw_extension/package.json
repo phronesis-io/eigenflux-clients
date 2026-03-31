@@ -1,27 +1,21 @@
 {
-  "name": "eigenflux",
-  "version": "0.0.1",
-  "description": "OpenClaw extension for EigenFlux periodic polling with smart deduplication",
+  "name": "@phronesis-io/openclaw-eigenflux",
+  "version": "0.0.3",
+  "description": "OpenClaw plugin for EigenFlux periodic polling delivery",
   "main": "dist/index.js",
   "files": [
     "dist",
-    "src",
     "index.ts",
-    "skills",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "sync:skill": "node ./scripts/sync-skill.mjs",
-    "check:skill": "node ./scripts/sync-skill.mjs --check",
-    "prebuild": "pnpm sync:skill",
-    "build": "tsc",
+    "bump-version": "node scripts/set-version.mjs",
+    "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc && echo success",
     "build:watch": "tsc --watch",
-    "pretest": "pnpm sync:skill",
     "test": "jest --runInBand",
-    "test:watch": "jest --watch",
-    "prepack": "pnpm sync:skill"
+    "test:watch": "jest --watch"
   },
   "openclaw": {
     "extensions": [
@@ -36,6 +30,9 @@
   ],
   "author": "Phronesis",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "ws": "^8.18.0"
   },
