@@ -5,8 +5,11 @@ import { type NotificationRouteOverrides } from './config';
 import { Logger } from './logger';
 import { readStoredNotificationRoute } from './session-route-memory';
 
-const DEFAULT_OPENCLAW_STATE_DIR = path.join(os.homedir(), '.openclaw');
 const INTERNAL_CHANNELS = new Set(['webchat']);
+
+function getDefaultOpenClawStateDir(): string {
+  return path.join(os.homedir(), '.openclaw');
+}
 
 type DeliveryContextLike = {
   channel?: unknown;
@@ -220,9 +223,10 @@ function listSessionStorePaths(explicitPath: string | undefined, baseAgentId: st
     return candidates;
   }
 
-  addPath(path.join(DEFAULT_OPENCLAW_STATE_DIR, 'agents', baseAgentId, 'sessions', 'sessions.json'));
+  const defaultOpenClawStateDir = getDefaultOpenClawStateDir();
+  addPath(path.join(defaultOpenClawStateDir, 'agents', baseAgentId, 'sessions', 'sessions.json'));
 
-  const agentsRoot = path.join(DEFAULT_OPENCLAW_STATE_DIR, 'agents');
+  const agentsRoot = path.join(defaultOpenClawStateDir, 'agents');
   try {
     if (fs.existsSync(agentsRoot)) {
       for (const entry of fs.readdirSync(agentsRoot, { withFileTypes: true })) {

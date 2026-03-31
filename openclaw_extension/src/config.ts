@@ -2,35 +2,19 @@
  * Internal configuration for the EigenFlux plugin.
  */
 
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
 const PLUGIN_VERSION = '0.0.1-alpha.0';
+const DEFAULT_SERVER_NAME = 'eigenflux';
 const DEFAULT_ENDPOINT = 'https://www.eigenflux.ai';
-const DEFAULT_WORKDIR = '~/.openclaw/eigenflux';
 const DEFAULT_GATEWAY_URL = 'ws://127.0.0.1:18789';
 const DEFAULT_SESSION_KEY = 'main';
 const DEFAULT_AGENT_ID = 'main';
 const DEFAULT_OPENCLAW_CLI_BIN = 'openclaw';
 const DEFAULT_POLL_INTERVAL_SEC = 300;
 const DEFAULT_PM_POLL_INTERVAL_SEC = 60;
-
-export type EigenFluxPluginConfig = {
-  enabled?: boolean;
-  endpoint?: string;
-  workdir?: string;
-  pollInterval?: number;
-  pmPollInterval?: number;
-  gatewayUrl?: string;
-  sessionKey?: string;
-  gatewayToken?: string;
-  agentId?: string;
-  replyChannel?: string;
-  replyTo?: string;
-  replyAccountId?: string;
-  openclawCliBin?: string;
-  sessionStorePath?: string;
-};
 
 export type NotificationRouteOverrides = {
   sessionKey: boolean;
@@ -40,22 +24,47 @@ export type NotificationRouteOverrides = {
   replyAccountId: boolean;
 };
 
-export type ResolvedEigenFluxPluginConfig = {
+export type EigenFluxServerConfig = {
+  enabled?: boolean;
+  name?: string;
+  endpoint?: string;
+  workdir?: string;
+  pollInterval?: number;
+  pmPollInterval?: number;
+  sessionKey?: string;
+  agentId?: string;
+  replyChannel?: string;
+  replyTo?: string;
+  replyAccountId?: string;
+};
+
+export type EigenFluxPluginConfig = {
+  gatewayUrl?: string;
+  gatewayToken?: string;
+  openclawCliBin?: string;
+  servers?: EigenFluxServerConfig[];
+};
+
+export type ResolvedEigenFluxServerConfig = {
   enabled: boolean;
+  name: string;
   endpoint: string;
   workdir: string;
   pollIntervalSec: number;
   pmPollIntervalSec: number;
-  gatewayUrl: string;
   sessionKey: string;
-  gatewayToken?: string;
   agentId: string;
   replyChannel?: string;
   replyTo?: string;
   replyAccountId?: string;
-  openclawCliBin: string;
-  sessionStorePath?: string;
   routeOverrides: NotificationRouteOverrides;
+};
+
+export type ResolvedEigenFluxPluginConfig = {
+  gatewayUrl: string;
+  gatewayToken?: string;
+  openclawCliBin: string;
+  servers: ResolvedEigenFluxServerConfig[];
 };
 
 type GlobalGatewayConfig = {
@@ -64,6 +73,13 @@ type GlobalGatewayConfig = {
       token?: string;
     };
   };
+};
+
+type DerivedNotificationRoute = {
+  agentId?: string;
+  replyChannel?: string;
+  replyTo?: string;
+  replyAccountId?: string;
 };
 
 function detectOpenClawVersion(): string | undefined {
@@ -117,16 +133,14 @@ function parsePositiveInteger(value: unknown, fallback: number): number {
   return fallback;
 }
 
-type DerivedNotificationRoute = {
-  agentId?: string;
-  replyChannel?: string;
-  replyTo?: string;
-  replyAccountId?: string;
-};
-
 function isSessionPeerShape(value: string | undefined): boolean {
   const normalized = value?.trim().toLowerCase();
-  return normalized === 'direct' || normalized === 'dm' || normalized === 'group' || normalized === 'channel';
+  return (
+    normalized === 'direct' ||
+    normalized === 'dm' ||
+    normalized === 'group' ||
+    normalized === 'channel'
+  );
 }
 
 function deriveNotificationRoute(sessionKey: string | undefined): DerivedNotificationRoute {
@@ -161,6 +175,89 @@ function deriveNotificationRoute(sessionKey: string | undefined): DerivedNotific
   return { agentId };
 }
 
+function createRouteOverrides(
+  normalized: Record<string, unknown>
+): NotificationRouteOverrides {
+  return {
+    sessionKey: readNonEmptyString(normalized.sessionKey) !== undefined,
+    agentId: readNonEmptyString(normalized.agentId) !== undefined,
+    replyChannel: readNonEmptyString(normalized.replyChannel) !== undefined,
+    replyTo: readNonEmptyString(normalized.replyTo) !== undefined,
+    replyAccountId: readNonEmptyString(normalized.replyAccountId) !== undefined,
+  };
+}
+
+function hasExplicitDefaultServer(servers: Record<string, unknown>[]): boolean {
+  return servers.some(
+    (server) => readNonEmptyString(server.name)?.toLowerCase() === DEFAULT_SERVER_NAME
+  );
+}
+
+function normalizeServersInput(config: Record<string, unknown>): EigenFluxServerConfig[] {
+  const explicitServers = Array.isArray(config.servers)
+    ? config.servers.filter(isRecord)
+    : [];
+
+  if (!hasExplicitDefaultServer(explicitServers)) {
+    return [{} as EigenFluxServerConfig, ...explicitServers];
+  }
+
+  return explicitServers;
+}
+
+function createServerName(baseName: string, usedNames: Set<string>): string {
+  if (!usedNames.has(baseName)) {
+    usedNames.add(baseName);
+    return baseName;
+  }
+
+  let suffix = 2;
+  while (usedNames.has(`${baseName}-${suffix}`)) {
+    suffix += 1;
+  }
+  const uniqueName = `${baseName}-${suffix}`;
+  usedNames.add(uniqueName);
+  return uniqueName;
+}
+
+function resolveServerConfig(
+  serverConfig: unknown,
+  index: number,
+  usedNames: Set<string>
+): ResolvedEigenFluxServerConfig {
+  const normalized = isRecord(serverConfig) ? serverConfig : {};
+  const rawName =
+    readNonEmptyString(normalized.name) ??
+    (index === 0 ? DEFAULT_SERVER_NAME : `server-${index + 1}`);
+  const name = createServerName(rawName, usedNames);
+  const sessionKey = readNonEmptyString(normalized.sessionKey) ?? DEFAULT_SESSION_KEY;
+  const derivedRoute = deriveNotificationRoute(sessionKey);
+  const workdir = expandHomeDir(
+    readNonEmptyString(normalized.workdir) ?? `~/.openclaw/${name}`
+  );
+  const sessionStorePath = readNonEmptyString(normalized.sessionStorePath);
+
+  return {
+    enabled: normalized.enabled !== false,
+    name,
+    endpoint: readNonEmptyString(normalized.endpoint) ?? DEFAULT_ENDPOINT,
+    workdir,
+    pollIntervalSec: parsePositiveInteger(normalized.pollInterval, DEFAULT_POLL_INTERVAL_SEC),
+    pmPollIntervalSec: parsePositiveInteger(
+      normalized.pmPollInterval,
+      DEFAULT_PM_POLL_INTERVAL_SEC
+    ),
+    sessionKey,
+    agentId: readNonEmptyString(normalized.agentId) ?? derivedRoute.agentId ?? DEFAULT_AGENT_ID,
+    replyChannel: readNonEmptyString(normalized.replyChannel) ?? derivedRoute.replyChannel,
+    replyTo: readNonEmptyString(normalized.replyTo) ?? derivedRoute.replyTo,
+    replyAccountId:
+      readNonEmptyString(normalized.replyAccountId) ?? derivedRoute.replyAccountId,
+    routeOverrides: createRouteOverrides(normalized),
+    ...(sessionStorePath ? { sessionStorePath: expandHomeDir(sessionStorePath) } : {}),
+  } as ResolvedEigenFluxServerConfig;
+}
+
 export function expandHomeDir(input: string): string {
   if (input === '~') {
     return os.homedir();
@@ -171,112 +268,84 @@ export function expandHomeDir(input: string): string {
   return input;
 }
 
+function buildSkillUrl(endpoint: string): string {
+  try {
+    return new URL('skill.md', endpoint.endsWith('/') ? endpoint : `${endpoint}/`).toString();
+  } catch {
+    return `${endpoint.replace(/\/+$/u, '')}/skill.md`;
+  }
+}
+
+export function resolveServerSkillPath(server: {
+  endpoint: string;
+  workdir: string;
+}): string {
+  const localSkillPath = path.join(server.workdir, 'skill.md');
+  if (fs.existsSync(localSkillPath)) {
+    return localSkillPath;
+  }
+  return buildSkillUrl(server.endpoint);
+}
+
 export function resolvePluginConfig(
   pluginConfig: unknown,
   globalConfig?: GlobalGatewayConfig
 ): ResolvedEigenFluxPluginConfig {
   const normalized = isRecord(pluginConfig) ? pluginConfig : {};
-  const sessionKey = readNonEmptyString(normalized.sessionKey) ?? DEFAULT_SESSION_KEY;
-  const derivedRoute = deriveNotificationRoute(sessionKey);
-
-  const workdir = expandHomeDir(
-    readNonEmptyString(normalized.workdir) ?? DEFAULT_WORKDIR
-  );
+  const usedNames = new Set<string>();
 
   return {
-    enabled: normalized.enabled !== false,
-    endpoint: readNonEmptyString(normalized.endpoint) ?? DEFAULT_ENDPOINT,
-    workdir,
-    pollIntervalSec: parsePositiveInteger(
-      normalized.pollInterval,
-      DEFAULT_POLL_INTERVAL_SEC
-    ),
-    pmPollIntervalSec: parsePositiveInteger(
-      normalized.pmPollInterval,
-      DEFAULT_PM_POLL_INTERVAL_SEC
-    ),
     gatewayUrl: readNonEmptyString(normalized.gatewayUrl) ?? DEFAULT_GATEWAY_URL,
-    sessionKey,
     gatewayToken:
       readNonEmptyString(normalized.gatewayToken) ??
       readNonEmptyString(globalConfig?.gateway?.auth?.token),
-    agentId: readNonEmptyString(normalized.agentId) ?? derivedRoute.agentId ?? DEFAULT_AGENT_ID,
-    replyChannel:
-      readNonEmptyString(normalized.replyChannel) ?? derivedRoute.replyChannel,
-    replyTo: readNonEmptyString(normalized.replyTo) ?? derivedRoute.replyTo,
-    replyAccountId:
-      readNonEmptyString(normalized.replyAccountId) ?? derivedRoute.replyAccountId,
     openclawCliBin:
       readNonEmptyString(normalized.openclawCliBin) ?? DEFAULT_OPENCLAW_CLI_BIN,
-    sessionStorePath: readNonEmptyString(normalized.sessionStorePath),
-    routeOverrides: {
-      sessionKey: readNonEmptyString(normalized.sessionKey) !== undefined,
-      agentId: readNonEmptyString(normalized.agentId) !== undefined,
-      replyChannel: readNonEmptyString(normalized.replyChannel) !== undefined,
-      replyTo: readNonEmptyString(normalized.replyTo) !== undefined,
-      replyAccountId: readNonEmptyString(normalized.replyAccountId) !== undefined,
-    },
+    servers: normalizeServersInput(normalized).map((server, index) =>
+      resolveServerConfig(server, index, usedNames)
+    ),
   };
 }
 
-export const PLUGIN_CONFIG = {
-  DEFAULT_ENDPOINT,
-  DEFAULT_WORKDIR,
-  DEFAULT_GATEWAY_URL,
-  DEFAULT_SESSION_KEY,
-  DEFAULT_AGENT_ID,
-  DEFAULT_OPENCLAW_CLI_BIN,
-  DEFAULT_POLL_INTERVAL_SEC,
-  DEFAULT_PM_POLL_INTERVAL_SEC,
-  CREDENTIALS_FILE: 'credentials.json',
-  PLUGIN_VERSION,
-  USER_AGENT: buildUserAgent(),
-} as const;
-
-export const PLUGIN_CONFIG_SCHEMA = {
+const SERVER_CONFIG_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
     enabled: {
       type: 'boolean',
-      description: 'Enable or disable the plugin',
+      description: 'Enable or disable background polling for this server',
       default: true,
+    },
+    name: {
+      type: 'string',
+      description: 'Server name used for routing, workdir defaults, and diagnostics',
+      default: DEFAULT_SERVER_NAME,
     },
     endpoint: {
       type: 'string',
-      description: 'EigenFlux API base URL',
+      description: 'EigenFlux API base URL for this server',
       default: DEFAULT_ENDPOINT,
     },
     workdir: {
       type: 'string',
-      description: 'Directory used to store EigenFlux credentials',
-      default: DEFAULT_WORKDIR,
+      description: 'Directory used to store server credentials and remembered session state',
     },
     pollInterval: {
       type: 'integer',
       minimum: 1,
-      description: 'Feed polling interval in seconds',
+      description: 'Feed polling interval in seconds for this server',
       default: DEFAULT_POLL_INTERVAL_SEC,
     },
     pmPollInterval: {
       type: 'integer',
       minimum: 1,
-      description: 'Private message polling interval in seconds',
+      description: 'Private message polling interval in seconds for this server',
       default: DEFAULT_PM_POLL_INTERVAL_SEC,
-    },
-    gatewayUrl: {
-      type: 'string',
-      description: 'OpenClaw Gateway WebSocket URL used for Gateway RPC fallback',
-      default: DEFAULT_GATEWAY_URL,
     },
     sessionKey: {
       type: 'string',
       description: 'Target session key used by runtime.subagent and heartbeat fallback',
       default: DEFAULT_SESSION_KEY,
-    },
-    gatewayToken: {
-      type: 'string',
-      description: 'Optional gateway token override used for Gateway RPC fallback',
     },
     agentId: {
       type: 'string',
@@ -295,10 +364,47 @@ export const PLUGIN_CONFIG_SCHEMA = {
       type: 'string',
       description: 'Optional reply account id for multi-account channel delivery',
     },
+  },
+} as const;
+
+export const PLUGIN_CONFIG = {
+  DEFAULT_SERVER_NAME,
+  DEFAULT_ENDPOINT,
+  DEFAULT_GATEWAY_URL,
+  DEFAULT_SESSION_KEY,
+  DEFAULT_AGENT_ID,
+  DEFAULT_OPENCLAW_CLI_BIN,
+  DEFAULT_POLL_INTERVAL_SEC,
+  DEFAULT_PM_POLL_INTERVAL_SEC,
+  CREDENTIALS_FILE: 'credentials.json',
+  PLUGIN_VERSION,
+  USER_AGENT: buildUserAgent(),
+} as const;
+
+export const PLUGIN_CONFIG_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    gatewayUrl: {
+      type: 'string',
+      description: 'OpenClaw Gateway WebSocket URL used for Gateway RPC fallback',
+      default: DEFAULT_GATEWAY_URL,
+    },
+    gatewayToken: {
+      type: 'string',
+      description: 'Optional gateway token override used for Gateway RPC fallback',
+    },
     openclawCliBin: {
       type: 'string',
-      description: 'OpenClaw CLI binary used by runtime command and spawn fallbacks',
+      description: 'OpenClaw CLI binary used by runtime command fallbacks',
       default: DEFAULT_OPENCLAW_CLI_BIN,
+    },
+    servers: {
+      type: 'array',
+      description:
+        'Server list. When empty or when no server named eigenflux is provided, the plugin prepends a default eigenflux server.',
+      default: [],
+      items: SERVER_CONFIG_SCHEMA,
     },
   },
 } as const;

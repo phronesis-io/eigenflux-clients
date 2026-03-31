@@ -61,8 +61,7 @@ describe('EigenFluxNotifier', () => {
       createConfig(),
       () => ({
         sendAgentMessage,
-      }),
-      jest.fn()
+      })
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -89,8 +88,7 @@ describe('EigenFluxNotifier', () => {
       createConfig(),
       () => ({
         sendAgentMessage,
-      }),
-      jest.fn()
+      })
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -116,8 +114,7 @@ describe('EigenFluxNotifier', () => {
       createConfig(),
       () => ({
         sendAgentMessage: jest.fn().mockRejectedValue(new Error('gateway failed')),
-      }),
-      jest.fn()
+      })
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -142,12 +139,6 @@ describe('EigenFluxNotifier', () => {
   test('falls back to runtime heartbeat when command path is unavailable', async () => {
     const enqueueSystemEvent = jest.fn().mockReturnValue(true);
     const requestHeartbeatNow = jest.fn();
-    const spawnRunner = jest.fn().mockResolvedValue({
-      ok: false as const,
-      mode: 'spawn',
-      error: 'spawn disabled in test',
-    });
-
     const notifier = new EigenFluxNotifier(
       createApi({
         runtime: {
@@ -161,8 +152,7 @@ describe('EigenFluxNotifier', () => {
       createConfig(),
       () => ({
         sendAgentMessage: jest.fn().mockRejectedValue(new Error('gateway failed')),
-      }),
-      spawnRunner
+      })
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -181,7 +171,7 @@ describe('EigenFluxNotifier', () => {
     });
   });
 
-  test('sendwithsubagent helper only uses runtime.subagent', async () => {
+  test('deliverWithSubagent only uses runtime.subagent', async () => {
     const run = jest.fn().mockResolvedValue({ runId: 'run-subagent-only' });
     const notifier = new EigenFluxNotifier(
       createApi({
@@ -195,8 +185,7 @@ describe('EigenFluxNotifier', () => {
       createConfig(),
       () => ({
         sendAgentMessage: jest.fn(),
-      }),
-      jest.fn()
+      })
     );
 
     await expect(notifier.deliverWithSubagent('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -253,8 +242,7 @@ describe('EigenFluxNotifier', () => {
       },
       () => ({
         sendAgentMessage: jest.fn(),
-      }),
-      jest.fn()
+      })
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -310,8 +298,7 @@ describe('EigenFluxNotifier', () => {
       },
       () => ({
         sendAgentMessage: jest.fn().mockRejectedValue(new Error('gateway failed')),
-      }),
-      jest.fn()
+      })
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -355,8 +342,7 @@ describe('EigenFluxNotifier', () => {
       },
       () => ({
         sendAgentMessage: jest.fn(),
-      }),
-      jest.fn()
+      })
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);

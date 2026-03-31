@@ -22,6 +22,8 @@ function waitFor(condition: () => boolean, timeoutMs = 8000): Promise<void> {
 }
 
 describe('register integration', () => {
+  let homeDir: string;
+  let originalHome: string | undefined;
   let workdir: string;
 
   let apiHttpServer: http.Server;
@@ -41,6 +43,9 @@ describe('register integration', () => {
   let gatewayPort: number;
 
   beforeEach(async () => {
+    originalHome = process.env.HOME;
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-home-'));
+    process.env.HOME = homeDir;
     workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-workdir-'));
     fs.writeFileSync(
       path.join(workdir, 'credentials.json'),
@@ -100,6 +105,12 @@ describe('register integration', () => {
   });
 
   afterEach(async () => {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    fs.rmSync(homeDir, { recursive: true, force: true });
     fs.rmSync(workdir, { recursive: true, force: true });
     await new Promise<void>((resolve) => apiHttpServer.close(() => resolve()));
     await new Promise<void>((resolve) => gatewayWss.close(() => resolve()));
@@ -108,6 +119,14 @@ describe('register integration', () => {
 
   test('falls back to gateway rpc agent when polling feed returns new items', async () => {
     jest.resetModules();
+    const sessionStorePath = path.join(
+      homeDir,
+      '.openclaw',
+      'agents',
+      'main',
+      'sessions',
+      'sessions.json'
+    );
     const { default: plugin } = await import('./index');
     const services: any[] = [];
     const gatewayMethods: string[] = [];
@@ -175,11 +194,16 @@ describe('register integration', () => {
         },
       },
       pluginConfig: {
-        endpoint: `http://127.0.0.1:${apiPort}`,
-        workdir,
-        pollInterval: 60,
         gatewayUrl: `ws://127.0.0.1:${gatewayPort}`,
-        sessionStorePath: path.join(workdir, 'missing-sessions.json'),
+        servers: [
+          {
+            name: 'eigenflux',
+            endpoint: `http://127.0.0.1:${apiPort}`,
+            workdir,
+            pollInterval: 60,
+            sessionStorePath,
+          },
+        ],
       },
       runtime: {},
       logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -199,6 +223,7 @@ describe('register integration', () => {
     expect(gatewayMethods).toEqual(['connect', 'agent']);
     expect(agentParams[0]).toEqual(
       expect.objectContaining({
+        agentId: 'main',
         sessionKey: 'main',
         message: expect.stringContaining('[EIGENFLUX_FEED_PAYLOAD]'),
         deliver: true,
@@ -206,6 +231,11 @@ describe('register integration', () => {
     );
     expect(String(agentParams[0].message)).toContain('"item_id": "501"');
     expect(String(agentParams[0].message)).toContain('"group_id": "group-int-1"');
+    expect(String(agentParams[0].message)).toContain('network=eigenflux');
+    expect(String(agentParams[0].message)).toContain(`workdir=${workdir}`);
+    expect(String(agentParams[0].message)).toContain(
+      `skill_file=http://127.0.0.1:${apiPort}/skill.md`
+    );
     expect(String(agentParams[0].message)).toContain(
       'submit the corresponding feedback scores through the normal EigenFlux workflow'
     );
@@ -232,6 +262,14 @@ describe('register integration', () => {
     ];
 
     jest.resetModules();
+    const sessionStorePath = path.join(
+      homeDir,
+      '.openclaw',
+      'agents',
+      'main',
+      'sessions',
+      'sessions.json'
+    );
     const { default: plugin } = await import('./index');
     const services: any[] = [];
     const agentParams: any[] = [];
@@ -296,11 +334,16 @@ describe('register integration', () => {
         },
       },
       pluginConfig: {
-        endpoint: `http://127.0.0.1:${apiPort}`,
-        workdir,
-        pollInterval: 60,
         gatewayUrl: `ws://127.0.0.1:${gatewayPort}`,
-        sessionStorePath: path.join(workdir, 'missing-sessions.json'),
+        servers: [
+          {
+            name: 'eigenflux',
+            endpoint: `http://127.0.0.1:${apiPort}`,
+            workdir,
+            pollInterval: 60,
+            sessionStorePath,
+          },
+        ],
       },
       runtime: {},
       logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -355,10 +398,15 @@ describe('register integration', () => {
     plugin.register({
       config: {},
       pluginConfig: {
-        endpoint: `http://127.0.0.1:${apiPort}`,
-        workdir,
-        pollInterval: 60,
-        sessionStorePath,
+        servers: [
+          {
+            name: 'eigenflux',
+            endpoint: `http://127.0.0.1:${apiPort}`,
+            workdir,
+            pollInterval: 60,
+            sessionStorePath,
+          },
+        ],
       },
       runtime: {
         subagent: {

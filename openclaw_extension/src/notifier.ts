@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
 import { type NotificationRouteOverrides } from './config';
@@ -42,8 +41,6 @@ type CommandRunner = (
   options: { timeoutMs: number }
 ) => Promise<{ code: number | null; stdout?: string; stderr?: string }>;
 
-type SpawnRunner = (argv: string[], timeoutMs: number) => Promise<NotifyAttemptResult>;
-
 type NotifyAttemptResult =
   | {
       ok: true;
@@ -63,20 +60,17 @@ export class EigenFluxNotifier {
   private readonly logger: Logger;
   private readonly config: EigenFluxNotifierConfig;
   private readonly createGatewayRpcClient: CreateGatewayRpcClient;
-  private readonly spawnRunner: SpawnRunner;
 
   constructor(
     api: OpenClawPluginApi,
     logger: Logger,
     config: EigenFluxNotifierConfig,
-    createGatewayRpcClient: CreateGatewayRpcClient = createDefaultGatewayRpcClient,
-    spawnRunner: SpawnRunner = runSpawnCommand
+    createGatewayRpcClient: CreateGatewayRpcClient = createDefaultGatewayRpcClient
   ) {
     this.api = api;
     this.logger = logger;
     this.config = config;
     this.createGatewayRpcClient = createGatewayRpcClient;
-    this.spawnRunner = spawnRunner;
   }
 
   async deliver(message: string): Promise<boolean> {
@@ -85,10 +79,8 @@ export class EigenFluxNotifier {
       () => this.tryNotifyViaRuntimeSubagent(message, route),
       () => this.tryNotifyViaGatewayRpcAgent(message, route),
       () => this.tryNotifyViaRuntimeCommandAgent(message, route),
-      () => this.tryNotifyViaSpawnAgent(message, route),
       () => this.tryNotifyViaRuntimeHeartbeat(message, route),
       () => this.tryNotifyViaRuntimeCommandHeartbeat(message),
-      () => this.tryNotifyViaSpawnHeartbeat(message),
     ];
 
     const errors: string[] = [];
@@ -211,13 +203,6 @@ export class EigenFluxNotifier {
     );
   }
 
-  private async tryNotifyViaSpawnAgent(
-    message: string,
-    route: ResolvedNotificationRoute
-  ): Promise<NotifyAttemptResult> {
-    return this.runSpawnCommand('spawn.agent', this.buildAgentCliArgs(message, route), route);
-  }
-
   private async tryNotifyViaRuntimeHeartbeat(
     message: string,
     route: ResolvedNotificationRoute
@@ -295,14 +280,6 @@ export class EigenFluxNotifier {
     );
   }
 
-  private async tryNotifyViaSpawnHeartbeat(message: string): Promise<NotifyAttemptResult> {
-    return this.runSpawnCommand(
-      'spawn.heartbeat',
-      this.buildHeartbeatCliArgs(message),
-      this.resolveRoute()
-    );
-  }
-
   private async runRuntimeCommand(
     mode: string,
     argv: string[],
@@ -346,33 +323,6 @@ export class EigenFluxNotifier {
         error: formatError(error),
       };
     }
-  }
-
-  private async runSpawnCommand(
-    mode: string,
-    argv: string[],
-    route: ResolvedNotificationRoute
-  ): Promise<NotifyAttemptResult> {
-    const [command, ...args] = argv;
-    if (!command) {
-      return {
-        ok: false,
-        mode,
-        error: 'missing command',
-      };
-    }
-
-    const result = await this.spawnRunner(argv, COMMAND_TIMEOUT_MS);
-    return result.ok
-      ? {
-          ...result,
-          mode,
-          sessionKey: result.sessionKey ?? route.sessionKey,
-        }
-      : {
-          ...result,
-          mode,
-        };
   }
 
   private buildAgentCliArgs(message: string, route: ResolvedNotificationRoute): string[] {
@@ -488,71 +438,4 @@ function formatError(error: unknown): string {
     return `${error.name}: ${error.message}`;
   }
   return String(error);
-}
-
-async function runSpawnCommand(argv: string[], timeoutMs: number): Promise<NotifyAttemptResult> {
-  const [command, ...args] = argv;
-  if (!command) {
-    return {
-      ok: false,
-      mode: 'spawn',
-      error: 'missing command',
-    };
-  }
-
-  return await new Promise<NotifyAttemptResult>((resolve) => {
-    const child = spawn(command, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-
-    const finish = (result: NotifyAttemptResult) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resolve(result);
-    };
-
-    const timer = setTimeout(() => {
-      child.kill();
-      finish({
-        ok: false,
-        mode: 'spawn',
-        error: `spawn timed out after ${timeoutMs}ms`,
-      });
-    }, timeoutMs);
-
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      finish({
-        ok: false,
-        mode: 'spawn',
-        error: `spawn failed: ${error.message}`,
-      });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        finish({
-          ok: true,
-          mode: 'spawn',
-        });
-        return;
-      }
-      finish({
-        ok: false,
-        mode: 'spawn',
-        error: (stderr || stdout || `exit code ${code}`).trim(),
-      });
-    });
-  });
 }

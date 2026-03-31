@@ -1,35 +1,80 @@
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { PLUGIN_CONFIG, resolvePluginConfig } from './config';
+import {
+  PLUGIN_CONFIG,
+  resolvePluginConfig,
+  resolveServerSkillPath,
+} from './config';
 
 describe('resolvePluginConfig', () => {
-  test('reads runtime settings from plugin config', () => {
-    const config = resolvePluginConfig({
-      endpoint: 'https://example.com',
-      workdir: '~/custom/eigenflux',
-      pollInterval: 45,
-      pmPollInterval: 30,
-      gatewayUrl: 'ws://127.0.0.1:29999',
-      sessionKey: 'agent:main:main',
-      gatewayToken: 'gw_plugin_token',
-    });
+  test('prepends the default eigenflux server when servers is omitted', () => {
+    const config = resolvePluginConfig({});
 
-    expect(config).toEqual({
+    expect(config.gatewayUrl).toBe(PLUGIN_CONFIG.DEFAULT_GATEWAY_URL);
+    expect(config.openclawCliBin).toBe(PLUGIN_CONFIG.DEFAULT_OPENCLAW_CLI_BIN);
+    expect(config.servers).toHaveLength(1);
+    expect(config.servers[0]).toEqual({
       enabled: true,
-      endpoint: 'https://example.com',
-      workdir: path.join(os.homedir(), 'custom/eigenflux'),
-      pollIntervalSec: 45,
-      pmPollIntervalSec: 30,
-      gatewayUrl: 'ws://127.0.0.1:29999',
-      sessionKey: 'agent:main:main',
-      gatewayToken: 'gw_plugin_token',
-      agentId: 'main',
+      name: 'eigenflux',
+      endpoint: PLUGIN_CONFIG.DEFAULT_ENDPOINT,
+      workdir: path.join(os.homedir(), '.openclaw/eigenflux'),
+      pollIntervalSec: PLUGIN_CONFIG.DEFAULT_POLL_INTERVAL_SEC,
+      pmPollIntervalSec: PLUGIN_CONFIG.DEFAULT_PM_POLL_INTERVAL_SEC,
+      sessionKey: PLUGIN_CONFIG.DEFAULT_SESSION_KEY,
+      agentId: PLUGIN_CONFIG.DEFAULT_AGENT_ID,
       replyChannel: undefined,
       replyTo: undefined,
       replyAccountId: undefined,
-      openclawCliBin: 'openclaw',
-      sessionStorePath: undefined,
+      routeOverrides: {
+        sessionKey: false,
+        agentId: false,
+        replyChannel: false,
+        replyTo: false,
+        replyAccountId: false,
+      },
+    });
+  });
+
+  test('prepends the default eigenflux server when no explicit eigenflux server exists', () => {
+    const config = resolvePluginConfig({
+      gatewayUrl: 'ws://127.0.0.1:29999',
+      openclawCliBin: '/opt/bin/openclaw',
+      servers: [
+        {
+          name: 'alpha',
+          endpoint: 'https://alpha.example.com',
+          workdir: '~/custom/alpha',
+          pollInterval: 45,
+          pmPollInterval: 30,
+          sessionKey: 'agent:ops:feishu:direct:ou_alpha',
+        },
+      ],
+    });
+
+    expect(config.gatewayUrl).toBe('ws://127.0.0.1:29999');
+    expect(config.openclawCliBin).toBe('/opt/bin/openclaw');
+    expect(config.servers).toHaveLength(2);
+    expect(config.servers[0]).toEqual(
+      expect.objectContaining({
+        name: 'eigenflux',
+        endpoint: PLUGIN_CONFIG.DEFAULT_ENDPOINT,
+        workdir: path.join(os.homedir(), '.openclaw/eigenflux'),
+      })
+    );
+    expect(config.servers[1]).toEqual({
+      enabled: true,
+      name: 'alpha',
+      endpoint: 'https://alpha.example.com',
+      workdir: path.join(os.homedir(), 'custom/alpha'),
+      pollIntervalSec: 45,
+      pmPollIntervalSec: 30,
+      sessionKey: 'agent:ops:feishu:direct:ou_alpha',
+      agentId: 'ops',
+      replyChannel: 'feishu',
+      replyTo: 'ou_alpha',
+      replyAccountId: undefined,
       routeOverrides: {
         sessionKey: true,
         agentId: false,
@@ -40,33 +85,56 @@ describe('resolvePluginConfig', () => {
     });
   });
 
-  test('falls back to defaults for invalid values', () => {
+  test('does not prepend another default server when eigenflux is explicitly configured', () => {
     const config = resolvePluginConfig({
-      pollInterval: 0,
-      pmPollInterval: 'bad',
-      endpoint: '   ',
+      servers: [
+        {
+          name: 'eigenflux',
+          workdir: '~/custom/eigenflux',
+          pollInterval: 15,
+        },
+        {
+          name: 'alpha',
+          endpoint: 'https://alpha.example.com',
+        },
+      ],
     });
 
-    expect(config.endpoint).toBe(PLUGIN_CONFIG.DEFAULT_ENDPOINT);
-    expect(config.workdir).toBe(path.join(os.homedir(), '.openclaw/eigenflux'));
-    expect(config.pollIntervalSec).toBe(PLUGIN_CONFIG.DEFAULT_POLL_INTERVAL_SEC);
-    expect(config.pmPollIntervalSec).toBe(PLUGIN_CONFIG.DEFAULT_PM_POLL_INTERVAL_SEC);
-    expect(config.gatewayUrl).toBe(PLUGIN_CONFIG.DEFAULT_GATEWAY_URL);
-    expect(config.sessionKey).toBe(PLUGIN_CONFIG.DEFAULT_SESSION_KEY);
-    expect(config.agentId).toBe(PLUGIN_CONFIG.DEFAULT_AGENT_ID);
-    expect(config.openclawCliBin).toBe(PLUGIN_CONFIG.DEFAULT_OPENCLAW_CLI_BIN);
-    expect(config.routeOverrides).toEqual({
-      sessionKey: false,
-      agentId: false,
-      replyChannel: false,
-      replyTo: false,
-      replyAccountId: false,
+    expect(config.servers).toHaveLength(2);
+    expect(config.servers[0]).toEqual(
+      expect.objectContaining({
+        name: 'eigenflux',
+        endpoint: 'https://www.eigenflux.ai',
+        workdir: path.join(os.homedir(), 'custom/eigenflux'),
+        pollIntervalSec: 15,
+      })
+    );
+    expect(config.servers[1]).toEqual(
+      expect.objectContaining({
+        name: 'alpha',
+        endpoint: 'https://alpha.example.com',
+      })
+    );
+  });
+
+  test('creates unique names when duplicate server names are configured', () => {
+    const config = resolvePluginConfig({
+      servers: [{ name: 'eigenflux' }, { name: 'eigenflux' }, {}],
     });
+
+    expect(config.servers.map((server) => server.name)).toEqual([
+      'eigenflux',
+      'eigenflux-2',
+      'server-3',
+    ]);
+    expect(config.servers[2].workdir).toBe(path.join(os.homedir(), '.openclaw/server-3'));
   });
 
   test('uses gateway auth token from host config when plugin config omits it', () => {
     const config = resolvePluginConfig(
-      {},
+      {
+        servers: [{ name: 'eigenflux' }],
+      },
       {
         gateway: {
           auth: {
@@ -78,27 +146,35 @@ describe('resolvePluginConfig', () => {
 
     expect(config.gatewayToken).toBe('gw_host_token');
   });
+});
 
-  test('derives agent and reply route from a channel-scoped session key', () => {
-    const config = resolvePluginConfig({
-      sessionKey: 'agent:main:feishu:direct:ou_2c1e5b60963ed271ea8ea5db9f4b1440',
-    });
+describe('resolveServerSkillPath', () => {
+  test('prefers local workdir skill.md when it exists', () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-skill-path-'));
+    const localSkillPath = path.join(workdir, 'skill.md');
+    fs.writeFileSync(localSkillPath, '# local skill\n', 'utf-8');
 
-    expect(config.agentId).toBe('main');
-    expect(config.replyChannel).toBe('feishu');
-    expect(config.replyTo).toBe('ou_2c1e5b60963ed271ea8ea5db9f4b1440');
-    expect(config.replyAccountId).toBeUndefined();
+    expect(
+      resolveServerSkillPath({
+        endpoint: 'https://example.com/root',
+        workdir,
+      })
+    ).toBe(localSkillPath);
+
+    fs.rmSync(workdir, { recursive: true, force: true });
   });
 
-  test('derives account-scoped reply route from a session key when available', () => {
-    const config = resolvePluginConfig({
-      sessionKey: 'agent:ops:telegram:primary:direct:123456',
-    });
+  test('falls back to endpoint skill.md when local file is absent', () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-skill-path-'));
 
-    expect(config.agentId).toBe('ops');
-    expect(config.replyChannel).toBe('telegram');
-    expect(config.replyAccountId).toBe('primary');
-    expect(config.replyTo).toBe('123456');
+    expect(
+      resolveServerSkillPath({
+        endpoint: 'https://example.com/root',
+        workdir,
+      })
+    ).toBe('https://example.com/root/skill.md');
+
+    fs.rmSync(workdir, { recursive: true, force: true });
   });
 });
 

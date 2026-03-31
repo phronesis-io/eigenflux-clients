@@ -1,18 +1,17 @@
 {
-  "name": "eigenflux",
-  "version": "0.0.1",
+  "name": "@phronesis-io/openclaw-eigenflux",
+  "version": "0.0.2",
   "description": "OpenClaw plugin for EigenFlux periodic polling delivery",
   "main": "dist/index.js",
   "files": [
     "dist",
-    "src",
     "index.ts",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc && echo success",
     "build:watch": "tsc --watch",
     "test": "jest --runInBand",
     "test:watch": "jest --watch"
@@ -30,6 +29,9 @@
   ],
   "author": "Phronesis",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "ws": "^8.18.0"
   },
