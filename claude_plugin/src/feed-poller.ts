@@ -6,6 +6,8 @@
  */
 
 import type { FeedResponse } from './types.js';
+import { buildHeaders } from './config.js';
+import { log } from './logger.js';
 
 export interface FeedPollerConfig {
   apiUrl: string;
@@ -27,21 +29,21 @@ export class FeedPoller {
 
   start(): void {
     if (this.running) {
-      console.error('[eigenflux:feed] Poller already running');
+      log('[eigenflux:feed] Poller already running');
       return;
     }
 
     this.running = true;
-    console.error(`[eigenflux:feed] Starting poller (interval: ${this.config.pollIntervalSec}s)`);
+    log(`[eigenflux:feed] Starting poller (interval: ${this.config.pollIntervalSec}s)`);
 
     // Immediate poll, then schedule
     this.pollOnce().catch((err) => {
-      console.error('[eigenflux:feed] Initial poll error:', err);
+      log('[eigenflux:feed] Initial poll error:', err);
     });
 
     this.intervalId = setInterval(() => {
       this.pollOnce().catch((err) => {
-        console.error('[eigenflux:feed] Poll error:', err);
+        log('[eigenflux:feed] Poll error:', err);
       });
     }, this.config.pollIntervalSec * 1000);
   }
@@ -49,7 +51,7 @@ export class FeedPoller {
   stop(): void {
     if (!this.running) return;
 
-    console.error('[eigenflux:feed] Stopping poller');
+    log('[eigenflux:feed] Stopping poller');
     this.running = false;
 
     if (this.intervalId) {
@@ -71,18 +73,15 @@ export class FeedPoller {
     const url = `${this.config.apiUrl}/api/v1/items/feed?action=refresh&limit=20`;
 
     try {
-      console.error(`[eigenflux:feed] Polling: ${url}`);
+      log(`[eigenflux:feed] Polling: ${url}`);
 
       const response = await fetch(url, {
         method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
+        headers: buildHeaders(token),
       });
 
       if (response.status === 401) {
-        console.error('[eigenflux:feed] 401 Unauthorized');
+        log('[eigenflux:feed] 401 Unauthorized');
         if (!this.authPrompted) {
           this.authPrompted = true;
           await this.config.onAuthRequired('unauthorized');
@@ -105,7 +104,7 @@ export class FeedPoller {
 
       const items = data.data.items ?? [];
       const notifications = data.data.notifications ?? [];
-      console.error(
+      log(
         `[eigenflux:feed] Polled: ${items.length} items, ${notifications.length} notifications, has_more=${data.data.has_more}`
       );
 
@@ -115,7 +114,7 @@ export class FeedPoller {
 
       return data;
     } catch (error) {
-      console.error('[eigenflux:feed] Poll failed:', error instanceof Error ? error.message : error);
+      log('[eigenflux:feed] Poll failed:', error instanceof Error ? error.message : error);
       return null;
     }
   }
