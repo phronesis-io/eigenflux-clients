@@ -2,6 +2,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+jest.mock('os', () => {
+  const actual = jest.requireActual('os') as typeof import('os');
+  return {
+    ...actual,
+    homedir: jest.fn(() => actual.homedir()),
+  };
+});
+
 const sendAgentMessageMock = jest.fn().mockResolvedValue({
   sessionKey: 'main',
   runId: 'run-test',
@@ -24,24 +32,17 @@ function createLogger() {
 
 describe('register unit', () => {
   let homeDir: string;
-  let originalHome: string | undefined;
   let workdir: string;
 
   beforeEach(() => {
     jest.resetModules();
     jest.clearAllMocks();
-    originalHome = process.env.HOME;
     homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-home-'));
-    process.env.HOME = homeDir;
+    (os.homedir as jest.MockedFunction<typeof os.homedir>).mockReturnValue(homeDir);
     workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-workdir-'));
   });
 
   afterEach(() => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
-    }
     fs.rmSync(homeDir, { recursive: true, force: true });
     fs.rmSync(workdir, { recursive: true, force: true });
     delete (global as { fetch?: typeof fetch }).fetch;

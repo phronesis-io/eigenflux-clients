@@ -86,7 +86,7 @@ describe('resolvePluginConfig', () => {
       sessionKey: 'agent:ops:feishu:direct:ou_alpha',
       agentId: 'ops',
       replyChannel: 'feishu',
-      replyTo: 'ou_alpha',
+      replyTo: 'user:ou_alpha',
       replyAccountId: undefined,
       routeOverrides: {
         sessionKey: true,
@@ -126,6 +126,32 @@ describe('resolvePluginConfig', () => {
       expect.objectContaining({
         name: 'alpha',
         endpoint: 'https://alpha.example.com',
+      })
+    );
+  });
+
+  test('ignores schema-defaulted main session fields so route discovery stays automatic', () => {
+    const config = resolvePluginConfig({
+      servers: [
+        {
+          name: 'eigenflux',
+          sessionKey: 'main',
+          agentId: 'main',
+        },
+      ],
+    });
+
+    expect(config.servers[0]).toEqual(
+      expect.objectContaining({
+        sessionKey: 'main',
+        agentId: 'main',
+        routeOverrides: {
+          sessionKey: false,
+          agentId: false,
+          replyChannel: false,
+          replyTo: false,
+          replyAccountId: false,
+        },
       })
     );
   });

@@ -25,6 +25,7 @@ import {
   type EigenFluxPromptServerContext,
 } from './agent-prompt-templates';
 import { EigenFluxNotifier } from './notifier';
+import { normalizeReplyTarget } from './reply-target';
 import { writeStoredNotificationRoute } from './session-route-memory';
 
 type JsonRecord = Record<string, unknown>;
@@ -426,32 +427,6 @@ function isInternalAgentSessionKey(value: string | undefined): boolean {
   return parts[0]?.toLowerCase() === 'agent' && parts[2]?.toLowerCase() === 'main';
 }
 
-function isNormalizedConversationTarget(value: string): boolean {
-  return /^(user|chat|channel|room):/u.test(value);
-}
-
-function normalizeReplyTarget(
-  value: unknown,
-  channel: string | undefined,
-  fallbackKind?: 'user' | 'chat' | 'channel' | 'room'
-): string | undefined {
-  const trimmed = readNonEmptyString(value);
-  if (!trimmed) {
-    return undefined;
-  }
-  if (isNormalizedConversationTarget(trimmed)) {
-    return trimmed;
-  }
-  if (channel && trimmed.startsWith(`${channel}:`)) {
-    const inner = trimmed.slice(channel.length + 1).trim();
-    if (isNormalizedConversationTarget(inner)) {
-      return inner;
-    }
-    return fallbackKind ? `${fallbackKind}:${inner}` : inner;
-  }
-  return fallbackKind ? `${fallbackKind}:${trimmed}` : trimmed;
-}
-
 async function resolveCurrentCommandRoute(
   ctx: CommandRouteContext,
   serverConfig: ResolvedEigenFluxServerConfig,
@@ -462,7 +437,8 @@ async function resolveCurrentCommandRoute(
 
   let replyChannel = channel;
   let replyTo =
-    normalizeReplyTarget(ctx.to, channel) ?? normalizeReplyTarget(ctx.from, channel, 'user');
+    normalizeReplyTarget(ctx.to, { channel }) ??
+    normalizeReplyTarget(ctx.from, { channel, fallbackKind: 'user' });
   let replyAccountId = accountId;
 
   if (typeof ctx.getCurrentConversationBinding === 'function') {
@@ -471,8 +447,8 @@ async function resolveCurrentCommandRoute(
       if (binding) {
         replyChannel = normalizeChannel(binding.channel) ?? replyChannel;
         replyTo =
-          normalizeReplyTarget(binding.conversationId, replyChannel) ??
-          normalizeReplyTarget(binding.parentConversationId, replyChannel) ??
+          normalizeReplyTarget(binding.conversationId, { channel: replyChannel }) ??
+          normalizeReplyTarget(binding.parentConversationId, { channel: replyChannel }) ??
           replyTo;
         replyAccountId = readNonEmptyString(binding.accountId) ?? replyAccountId;
       }

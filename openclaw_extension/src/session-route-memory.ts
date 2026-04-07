@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './logger';
+import { normalizeReplyTarget } from './reply-target';
 
 export type StoredNotificationRoute = {
   sessionKey: string;
@@ -39,6 +40,7 @@ export function readStoredNotificationRoute(
   const filePath = resolveSessionRouteMemoryPath(trimmedWorkdir);
   try {
     if (!fs.existsSync(filePath)) {
+      logger.info(`Remembered route file missing: path=${filePath}`);
       return undefined;
     }
 
@@ -51,20 +53,28 @@ export function readStoredNotificationRoute(
     const sessionKey = readNonEmptyString(record.sessionKey);
     const agentId = readNonEmptyString(record.agentId);
     if (!sessionKey || !agentId) {
+      logger.warn(`Remembered route file is incomplete: path=${filePath}`);
       return undefined;
     }
 
-    return {
+    const route = {
       sessionKey,
       agentId,
       replyChannel: normalizeChannel(record.replyChannel),
-      replyTo: readNonEmptyString(record.replyTo),
+      replyTo: normalizeReplyTarget(readNonEmptyString(record.replyTo), {
+        channel: normalizeChannel(record.replyChannel),
+        sessionKey,
+      }),
       replyAccountId: readNonEmptyString(record.replyAccountId),
       updatedAt:
         typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt)
           ? record.updatedAt
           : 0,
     };
+    logger.info(
+      `Remembered route loaded: path=${filePath}, session_key=${route.sessionKey}, agent_id=${route.agentId}, channel=${route.replyChannel ?? 'n/a'}, to=${route.replyTo ?? 'n/a'}, account=${route.replyAccountId ?? 'n/a'}`
+    );
+    return route;
   } catch (error) {
     logger.debug(
       `Failed to read remembered session route ${filePath}: ${error instanceof Error ? error.message : String(error)}`
@@ -88,7 +98,10 @@ export function writeStoredNotificationRoute(
     sessionKey: route.sessionKey,
     agentId: route.agentId,
     replyChannel: normalizeChannel(route.replyChannel),
-    replyTo: readNonEmptyString(route.replyTo),
+    replyTo: normalizeReplyTarget(readNonEmptyString(route.replyTo), {
+      channel: normalizeChannel(route.replyChannel),
+      sessionKey: route.sessionKey,
+    }),
     replyAccountId: readNonEmptyString(route.replyAccountId),
     updatedAt: Date.now(),
   };
@@ -96,6 +109,9 @@ export function writeStoredNotificationRoute(
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+    logger.info(
+      `Remembered route saved: path=${filePath}, session_key=${payload.sessionKey}, agent_id=${payload.agentId}, channel=${payload.replyChannel ?? 'n/a'}, to=${payload.replyTo ?? 'n/a'}, account=${payload.replyAccountId ?? 'n/a'}`
+    );
     return true;
   } catch (error) {
     logger.warn(

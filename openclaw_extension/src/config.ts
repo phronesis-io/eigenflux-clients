@@ -7,6 +7,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { Logger } from './logger';
+import { normalizeReplyTarget } from './reply-target';
 
 const PLUGIN_VERSION = '0.0.4';
 const DEFAULT_SERVER_NAME = 'eigenflux';
@@ -190,7 +191,10 @@ function deriveNotificationRoute(sessionKey: string | undefined): DerivedNotific
       agentId,
       replyChannel: readNonEmptyString(parts[2]),
       replyAccountId: readNonEmptyString(parts[3]),
-      replyTo: readNonEmptyString(parts.slice(5).join(':')),
+      replyTo: normalizeReplyTarget(parts.slice(5).join(':'), {
+        channel: readNonEmptyString(parts[2]),
+        sessionKey: trimmed,
+      }),
     };
   }
 
@@ -198,7 +202,10 @@ function deriveNotificationRoute(sessionKey: string | undefined): DerivedNotific
     return {
       agentId,
       replyChannel: readNonEmptyString(parts[2]),
-      replyTo: readNonEmptyString(parts.slice(4).join(':')),
+      replyTo: normalizeReplyTarget(parts.slice(4).join(':'), {
+        channel: readNonEmptyString(parts[2]),
+        sessionKey: trimmed,
+      }),
     };
   }
 
@@ -208,12 +215,21 @@ function deriveNotificationRoute(sessionKey: string | undefined): DerivedNotific
 function createRouteOverrides(
   normalized: Record<string, unknown>
 ): NotificationRouteOverrides {
+  const sessionKey = readNonEmptyString(normalized.sessionKey);
+  const agentId = readNonEmptyString(normalized.agentId);
+  const replyChannel = readNonEmptyString(normalized.replyChannel);
+  const replyTo = readNonEmptyString(normalized.replyTo);
+  const replyAccountId = readNonEmptyString(normalized.replyAccountId);
+
   return {
-    sessionKey: readNonEmptyString(normalized.sessionKey) !== undefined,
-    agentId: readNonEmptyString(normalized.agentId) !== undefined,
-    replyChannel: readNonEmptyString(normalized.replyChannel) !== undefined,
-    replyTo: readNonEmptyString(normalized.replyTo) !== undefined,
-    replyAccountId: readNonEmptyString(normalized.replyAccountId) !== undefined,
+    sessionKey: sessionKey !== undefined && sessionKey !== DEFAULT_SESSION_KEY,
+    agentId:
+      agentId !== undefined &&
+      agentId !== DEFAULT_AGENT_ID &&
+      !(sessionKey && deriveNotificationRoute(sessionKey).agentId === agentId),
+    replyChannel: replyChannel !== undefined,
+    replyTo: replyTo !== undefined,
+    replyAccountId: replyAccountId !== undefined,
   };
 }
 
@@ -263,6 +279,12 @@ function resolveServerConfig(
   const name = createServerName(rawName, usedNames);
   const sessionKey = readNonEmptyString(normalized.sessionKey) ?? DEFAULT_SESSION_KEY;
   const derivedRoute = deriveNotificationRoute(sessionKey);
+  const replyChannel = readNonEmptyString(normalized.replyChannel) ?? derivedRoute.replyChannel;
+  const replyTo =
+    normalizeReplyTarget(readNonEmptyString(normalized.replyTo), {
+      channel: replyChannel,
+      sessionKey,
+    }) ?? derivedRoute.replyTo;
   const workdir = expandHomeDir(
     readNonEmptyString(normalized.workdir) ?? `~/.openclaw/${name}`
   );
@@ -289,8 +311,8 @@ function resolveServerConfig(
     ),
     sessionKey,
     agentId: readNonEmptyString(normalized.agentId) ?? derivedRoute.agentId ?? DEFAULT_AGENT_ID,
-    replyChannel: readNonEmptyString(normalized.replyChannel) ?? derivedRoute.replyChannel,
-    replyTo: readNonEmptyString(normalized.replyTo) ?? derivedRoute.replyTo,
+    replyChannel,
+    replyTo,
     replyAccountId:
       readNonEmptyString(normalized.replyAccountId) ?? derivedRoute.replyAccountId,
     routeOverrides: createRouteOverrides(normalized),

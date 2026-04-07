@@ -75,6 +75,9 @@ export class EigenFluxNotifier {
 
   async deliver(message: string): Promise<boolean> {
     const route = this.resolveRoute();
+    this.logger.info(
+      `Delivery route resolved: ${formatRouteForLog(route)}, message_preview=${previewMessage(message)}`
+    );
     const attempts: Array<() => Promise<NotifyAttemptResult>> = [
       () => this.tryNotifyViaRuntimeSubagent(message, route),
       () => this.tryNotifyViaGatewayRpcAgent(message, route),
@@ -98,6 +101,9 @@ export class EigenFluxNotifier {
         this.logDispatch(result);
         return true;
       }
+      this.logger.warn(
+        `Notification attempt failed: mode=${result.mode}, ${formatRouteForLog(route)}, error=${result.error}`
+      );
       errors.push(`${result.mode}: ${result.error}`);
     }
 
@@ -107,6 +113,9 @@ export class EigenFluxNotifier {
 
   async deliverWithSubagent(message: string): Promise<boolean> {
     const route = this.resolveRoute();
+    this.logger.info(
+      `Subagent-only delivery route resolved: ${formatRouteForLog(route)}, message_preview=${previewMessage(message)}`
+    );
     const result = await this.tryNotifyViaRuntimeSubagent(message, route);
     if (!result.ok) {
       this.logger.warn(`runtime.subagent test dispatch failed: ${result.error}`);
@@ -143,6 +152,9 @@ export class EigenFluxNotifier {
     }
 
     try {
+      this.logger.info(
+        `Attempting runtime.subagent delivery: ${formatRouteForLog(route)}, deliver=true`
+      );
       const result = await runtimeSubagent.run({
         sessionKey: route.sessionKey,
         message,
@@ -169,6 +181,9 @@ export class EigenFluxNotifier {
     route: ResolvedNotificationRoute
   ): Promise<NotifyAttemptResult> {
     try {
+      this.logger.info(
+        `Attempting gateway.rpc.agent delivery: ${formatRouteForLog(route)}, gateway_url=${this.config.gatewayUrl}`
+      );
       const client = this.createGatewayRpcClient(
         {
           ...this.config,
@@ -244,11 +259,13 @@ export class EigenFluxNotifier {
     }
 
     try {
+      const deliveryContext = this.resolveHeartbeatDeliveryContext(route);
+      this.logger.info(
+        `Attempting runtime.system.heartbeat delivery: ${formatRouteForLog(route)}, delivery_context=${formatDeliveryContextForLog(deliveryContext)}`
+      );
       const enqueued = runtimeSystem.enqueueSystemEvent(message, {
         sessionKey: route.sessionKey,
-        ...(this.resolveHeartbeatDeliveryContext(route)
-          ? { deliveryContext: this.resolveHeartbeatDeliveryContext(route) }
-          : {}),
+        ...(deliveryContext ? { deliveryContext } : {}),
       });
       runtimeSystem.requestHeartbeatNow({
         reason: HEARTBEAT_REASON,
@@ -302,6 +319,9 @@ export class EigenFluxNotifier {
     }
 
     try {
+      this.logger.info(
+        `Attempting ${mode} delivery: ${formatRouteForLog(route)}, argv=${formatCommandArgsForLog(argv)}`
+      );
       const result = await runtimeCommand(argv, { timeoutMs: COMMAND_TIMEOUT_MS });
       if (result.code === 0) {
         return {
@@ -314,7 +334,7 @@ export class EigenFluxNotifier {
       return {
         ok: false,
         mode,
-        error: formatCommandFailure(result),
+        error: `${formatCommandFailure(result)} (argv=${formatCommandArgsForLog(argv)})`,
       };
     } catch (error) {
       return {
@@ -389,6 +409,9 @@ export class EigenFluxNotifier {
     if (!route.sessionKey || !route.agentId) {
       return;
     }
+    if (isInternalSessionKey(route.sessionKey)) {
+      return;
+    }
     writeStoredNotificationRoute(this.config.workdir, route, this.logger);
   }
 
@@ -403,6 +426,16 @@ export class EigenFluxNotifier {
       .join(', ');
     this.logger.info(`Notification dispatched: ${details}`);
   }
+}
+
+function isInternalSessionKey(sessionKey: string): boolean {
+  const trimmed = sessionKey.trim();
+  if (!trimmed || trimmed === 'main') {
+    return true;
+  }
+
+  const parts = trimmed.split(':').filter((part) => part.length > 0);
+  return parts[0]?.toLowerCase() === 'agent' && parts[2]?.toLowerCase() === 'main';
 }
 
 function createDefaultGatewayRpcClient(
@@ -438,4 +471,53 @@ function formatError(error: unknown): string {
     return `${error.name}: ${error.message}`;
   }
   return String(error);
+}
+
+function formatRouteForLog(route: ResolvedNotificationRoute): string {
+  return [
+    `session_key=${route.sessionKey}`,
+    `agent_id=${route.agentId}`,
+    `channel=${route.replyChannel ?? 'n/a'}`,
+    `to=${route.replyTo ?? 'n/a'}`,
+    `account=${route.replyAccountId ?? 'n/a'}`,
+  ].join(', ');
+}
+
+function formatDeliveryContextForLog(
+  deliveryContext:
+    | {
+        channel?: string;
+        to?: string;
+        accountId?: string;
+      }
+    | undefined
+): string {
+  if (!deliveryContext) {
+    return 'none';
+  }
+  return [
+    `channel=${deliveryContext.channel ?? 'n/a'}`,
+    `to=${deliveryContext.to ?? 'n/a'}`,
+    `account=${deliveryContext.accountId ?? 'n/a'}`,
+  ].join(', ');
+}
+
+function previewMessage(message: string, maxLength = 120): string {
+  const singleLine = message.replace(/\s+/gu, ' ').trim();
+  if (singleLine.length <= maxLength) {
+    return JSON.stringify(singleLine);
+  }
+  return JSON.stringify(`${singleLine.slice(0, maxLength - 3)}...`);
+}
+
+function formatCommandArgsForLog(argv: string[]): string {
+  const sanitized = [...argv];
+  for (let index = 0; index < sanitized.length; index += 1) {
+    if (sanitized[index] === '--message' || sanitized[index] === '--text') {
+      if (typeof sanitized[index + 1] === 'string') {
+        sanitized[index + 1] = `<len:${sanitized[index + 1].length}>`;
+      }
+    }
+  }
+  return JSON.stringify(sanitized);
 }

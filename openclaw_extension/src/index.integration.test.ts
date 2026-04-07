@@ -4,6 +4,14 @@ import * as path from 'path';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 
+jest.mock('os', () => {
+  const actual = jest.requireActual('os') as typeof import('os');
+  return {
+    ...actual,
+    homedir: jest.fn(() => actual.homedir()),
+  };
+});
+
 const packageManifest = require('../package.json') as { version: string };
 
 function readHeaderValue(value: string | string[] | undefined): string | undefined {
@@ -32,7 +40,6 @@ function waitFor(condition: () => boolean, timeoutMs = 8000): Promise<void> {
 
 describe('register integration', () => {
   let homeDir: string;
-  let originalHome: string | undefined;
   let workdir: string;
 
   let apiHttpServer: http.Server;
@@ -54,9 +61,8 @@ describe('register integration', () => {
   let gatewayPort: number;
 
   beforeEach(async () => {
-    originalHome = process.env.HOME;
     homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-home-'));
-    process.env.HOME = homeDir;
+    (os.homedir as jest.MockedFunction<typeof os.homedir>).mockReturnValue(homeDir);
     workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-workdir-'));
     fs.writeFileSync(
       path.join(workdir, 'credentials.json'),
@@ -120,11 +126,6 @@ describe('register integration', () => {
   });
 
   afterEach(async () => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
-    }
     fs.rmSync(homeDir, { recursive: true, force: true });
     fs.rmSync(workdir, { recursive: true, force: true });
     await new Promise<void>((resolve) => apiHttpServer.close(() => resolve()));

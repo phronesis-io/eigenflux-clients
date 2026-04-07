@@ -39,7 +39,7 @@ function createConfig() {
     sessionKey: 'agent:main:feishu:direct:ou_123',
     agentId: 'main',
     replyChannel: 'feishu',
-    replyTo: 'ou_123',
+    replyTo: 'user:ou_123',
     openclawCliBin: 'openclaw',
   };
 }
@@ -130,7 +130,7 @@ describe('EigenFluxNotifier', () => {
         '--reply-channel',
         'feishu',
         '--reply-to',
-        'ou_123',
+        'user:ou_123',
       ],
       { timeoutMs: 15000 }
     );
@@ -160,7 +160,7 @@ describe('EigenFluxNotifier', () => {
       sessionKey: 'agent:main:feishu:direct:ou_123',
       deliveryContext: {
         channel: 'feishu',
-        to: 'ou_123',
+        to: 'user:ou_123',
       },
     });
     expect(requestHeartbeatNow).toHaveBeenCalledWith({
@@ -293,7 +293,7 @@ describe('EigenFluxNotifier', () => {
         ...createConfig(),
         sessionKey: 'main',
         replyChannel: 'feishu',
-        replyTo: 'ou_123',
+        replyTo: 'user:ou_123',
         sessionStorePath,
       },
       () => ({
@@ -353,7 +353,61 @@ describe('EigenFluxNotifier', () => {
     expect(remembered.sessionKey).toBe('agent:main:feishu:direct:ou_123');
     expect(remembered.agentId).toBe('main');
     expect(remembered.replyChannel).toBe('feishu');
-    expect(remembered.replyTo).toBe('ou_123');
+    expect(remembered.replyTo).toBe('user:ou_123');
+
+    fs.rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test('does not overwrite remembered external routes with an internal main fallback', async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-notifier-main-memory-'));
+    fs.writeFileSync(
+      path.join(workdir, 'session.json'),
+      JSON.stringify(
+        {
+          sessionKey: 'agent:main:feishu:group:oc_saved',
+          agentId: 'main',
+          replyChannel: 'feishu',
+          replyTo: 'chat:oc_saved',
+          replyAccountId: 'default',
+          updatedAt: 1,
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+
+    const run = jest.fn().mockResolvedValue({ runId: 'run-subagent-main' });
+    const notifier = new EigenFluxNotifier(
+      createApi({
+        runtime: {
+          subagent: {
+            run,
+          },
+        } as OpenClawPluginApi['runtime'],
+      }),
+      createLogger(),
+      {
+        ...createConfig(),
+        workdir,
+        sessionKey: 'main',
+        agentId: 'main',
+        replyChannel: undefined,
+        replyTo: undefined,
+        replyAccountId: undefined,
+      },
+      () => ({
+        sendAgentMessage: jest.fn(),
+      })
+    );
+
+    await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
+
+    const remembered = JSON.parse(
+      fs.readFileSync(path.join(workdir, 'session.json'), 'utf-8')
+    ) as Record<string, unknown>;
+    expect(remembered.sessionKey).toBe('agent:main:feishu:group:oc_saved');
+    expect(remembered.replyTo).toBe('chat:oc_saved');
 
     fs.rmSync(workdir, { recursive: true, force: true });
   });

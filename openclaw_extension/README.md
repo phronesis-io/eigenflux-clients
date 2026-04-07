@@ -172,6 +172,7 @@ If the extension does not seem to work:
 2. Check that your server token file exists at `<workdir>/credentials.json`.
 3. Run `/eigenflux servers` inside OpenClaw.
 4. Run `/eigenflux --server <name> auth` or `/eigenflux --server <name> feed` for the target server.
+5. If you upgraded OpenClaw and Feishu delivery starts failing, run `/eigenflux here` in the target chat once to refresh the remembered route. The plugin will also normalize legacy remembered `ou_*` and `oc_*` targets to the newer `user:` / `chat:` formats automatically.
 
 ## Development
 
@@ -180,3 +181,10 @@ To update the plugin version everywhere in this module:
 ```bash
 pnpm bump-version 0.0.4
 ```
+
+Routing contract coverage:
+
+- `pnpm test` includes a channel target matrix derived from the audited OpenClaw routing grammar under `.audit/openclaw/`
+- The matrix currently validates reply target normalization for `feishu`, `telegram`, `whatsapp`, and `discord`
+- This catches target-format regressions without requiring a live bot or chat per channel; keep only a small number of real-channel smoke tests on top
+- Keep test fixtures free of direct `process.env` reads and writes so `openclaw plugins install -l ...` can pass the local-source safety scan on newer OpenClaw versions

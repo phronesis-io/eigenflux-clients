@@ -133,4 +133,117 @@ describe('resolveNotificationRoute', () => {
 
     fs.rmSync(workdir, { recursive: true, force: true });
   });
+
+  test('normalizes remembered legacy feishu targets from session memory', () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-route-legacy-memory-'));
+
+    writeStoredNotificationRoute(
+      workdir,
+      {
+        sessionKey: 'agent:mengtian:feishu:direct:ou_legacy',
+        agentId: 'mengtian',
+        replyChannel: 'feishu',
+        replyTo: 'ou_legacy',
+        replyAccountId: 'default',
+      },
+      createLogger()
+    );
+
+    const route = resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        workdir,
+        routeOverrides: {
+          sessionKey: false,
+          agentId: false,
+          replyChannel: false,
+          replyTo: false,
+          replyAccountId: false,
+        },
+      },
+      createLogger()
+    );
+
+    expect(route).toEqual({
+      sessionKey: 'agent:mengtian:feishu:direct:ou_legacy',
+      agentId: 'mengtian',
+      replyChannel: 'feishu',
+      replyTo: 'user:ou_legacy',
+      replyAccountId: 'default',
+    });
+
+    fs.rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test('prefers the session-store route whose peer shape matches the normalized target', () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-route-peer-shape-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 100,
+          deliveryContext: { channel: 'webchat' },
+        },
+        'agent:main:feishu:group:oc_group_target': {
+          updatedAt: 200,
+          deliveryContext: {
+            channel: 'feishu',
+            to: 'chat:oc_group_target',
+            accountId: 'default',
+          },
+        },
+        'agent:mengtian:feishu:direct:oc_group_target': {
+          updatedAt: 300,
+          origin: {
+            provider: 'feishu',
+            to: 'oc_group_target',
+            accountId: 'default',
+          },
+        },
+      }),
+      'utf-8'
+    );
+
+    writeStoredNotificationRoute(
+      workdir,
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        replyChannel: 'feishu',
+        replyTo: 'chat:oc_group_target',
+        replyAccountId: 'default',
+      },
+      createLogger()
+    );
+
+    const route = resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        workdir,
+        routeOverrides: {
+          sessionKey: false,
+          agentId: false,
+          replyChannel: false,
+          replyTo: false,
+          replyAccountId: false,
+        },
+      },
+      createLogger()
+    );
+
+    expect(route).toEqual({
+      sessionKey: 'agent:main:feishu:group:oc_group_target',
+      agentId: 'main',
+      replyChannel: 'feishu',
+      replyTo: 'chat:oc_group_target',
+      replyAccountId: 'default',
+    });
+
+    fs.rmSync(workdir, { recursive: true, force: true });
+  });
 });

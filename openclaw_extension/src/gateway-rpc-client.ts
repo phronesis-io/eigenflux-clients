@@ -63,6 +63,9 @@ export class OpenClawGatewayRpcClient {
       const sessionKey = this.options.sessionKey || (await this.resolveSessionKey(conn));
       const agentId = this.options.agentId?.trim() || this.resolveAgentIdFromSessionKey(sessionKey);
       const idempotencyKey = randomUUID();
+      this.options.logger.info(
+        `Gateway agent request: session_key=${sessionKey}, agent_id=${agentId}, channel=${this.options.replyChannel ?? 'n/a'}, to=${this.options.replyTo ?? 'n/a'}, account=${this.options.replyAccountId ?? 'n/a'}, message_preview=${previewMessage(message)}`
+      );
 
       const response = await conn.request('agent', {
         sessionKey,
@@ -78,6 +81,9 @@ export class OpenClawGatewayRpcClient {
       });
 
       const runId = String(response?.runId || idempotencyKey);
+      this.options.logger.info(
+        `Gateway agent response: session_key=${sessionKey}, run_id=${runId}, status=${String(response?.status || 'unknown')}`
+      );
       return { sessionKey, runId };
     });
   }
@@ -102,8 +108,12 @@ export class OpenClawGatewayRpcClient {
       const sessions = Array.isArray(response?.sessions)
         ? (response.sessions as Array<{ key?: unknown; active?: unknown; kind?: unknown }>)
         : [];
+      this.options.logger.info(
+        `Gateway sessions.list returned ${sessions.length} session(s); resolving fallback session key`
+      );
       const byMainKey = sessions.find((entry) => entry && entry.key === DEFAULT_SESSION_KEY);
       if (byMainKey && typeof byMainKey.key === 'string') {
+        this.options.logger.info(`Gateway session fallback selected explicit main key`);
         return DEFAULT_SESSION_KEY;
       }
 
@@ -111,6 +121,7 @@ export class OpenClawGatewayRpcClient {
         (entry) => entry && typeof entry.key === 'string' && String(entry.kind || '').toLowerCase() === 'main'
       );
       if (byMainKind && typeof byMainKind.key === 'string') {
+        this.options.logger.info(`Gateway session fallback selected kind=main key: ${byMainKind.key}`);
         return byMainKind.key;
       }
 
@@ -118,11 +129,13 @@ export class OpenClawGatewayRpcClient {
         (entry) => entry && typeof entry.key === 'string' && entry.active === true
       );
       if (byActive && typeof byActive.key === 'string') {
+        this.options.logger.info(`Gateway session fallback selected active key: ${byActive.key}`);
         return byActive.key;
       }
 
       const first = sessions.find((entry) => entry && typeof entry.key === 'string');
       if (first && typeof first.key === 'string') {
+        this.options.logger.info(`Gateway session fallback selected first key: ${first.key}`);
         return first.key;
       }
     } catch (error) {
@@ -182,6 +195,7 @@ class GatewayConnection {
       return;
     }
 
+    this.options.logger.info(`Connecting to gateway: url=${this.options.gatewayUrl}`);
     this.ws = new WebSocket(this.options.gatewayUrl, {
       maxPayload: 25 * 1024 * 1024,
     });
@@ -245,6 +259,7 @@ class GatewayConnection {
             void this.request('connect', this.buildConnectParams())
               .then(() => {
                 this.connected = true;
+                this.options.logger.info(`Gateway connect handshake completed`);
                 settle(() => resolve());
               })
               .catch(onConnectError);
@@ -289,6 +304,9 @@ class GatewayConnection {
       method,
       params,
     };
+    this.options.logger.info(
+      `Gateway request queued: method=${method}, request_id=${id}, params=${formatGatewayParamsForLog(params)}`
+    );
 
     return new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -327,10 +345,16 @@ class GatewayConnection {
     clearTimeout(pending.timer);
     this.pending.delete(frame.id);
     if (frame.ok) {
+      this.options.logger.info(
+        `Gateway response ok: request_id=${frame.id}, payload=${formatGatewayParamsForLog(frame.payload)}`
+      );
       pending.resolve(frame.payload);
       return;
     }
     const message = frame.error?.message || 'unknown gateway error';
+    this.options.logger.warn(
+      `Gateway response error: request_id=${frame.id}, message=${message}, code=${frame.error?.code ?? 'n/a'}`
+    );
     pending.reject(new Error(message));
   }
 
@@ -370,4 +394,48 @@ class GatewayConnection {
       pending.reject(error);
     }
   }
+}
+
+function previewMessage(message: string, maxLength = 120): string {
+  const singleLine = message.replace(/\s+/gu, ' ').trim();
+  if (singleLine.length <= maxLength) {
+    return JSON.stringify(singleLine);
+  }
+  return JSON.stringify(`${singleLine.slice(0, maxLength - 3)}...`);
+}
+
+function formatGatewayParamsForLog(value: unknown): string {
+  try {
+    return JSON.stringify(
+      sanitizeGatewayValue(value),
+      (_key, item) => (typeof item === 'bigint' ? item.toString() : item)
+    );
+  } catch {
+    return '[unserializable]';
+  }
+}
+
+function sanitizeGatewayValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    if (value.length > 160) {
+      return `<string:${value.length}>`;
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeGatewayValue(item));
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'message' && typeof item === 'string') {
+      result[key] = previewMessage(item);
+      continue;
+    }
+    result[key] = sanitizeGatewayValue(item);
+  }
+  return result;
 }
