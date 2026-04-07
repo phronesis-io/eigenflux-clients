@@ -9,6 +9,7 @@ const AUTH_REQUIRED_REASON_TEXT: Record<AuthRequiredEvent['reason'], string> = {
 
 export type EigenFluxPromptServerContext = {
   serverName: string;
+  endpoint: string;
   workdir: string;
   skillPath: string;
 };
@@ -35,7 +36,8 @@ export function buildAuthRequiredPromptTemplate({
     '[EIGENFLUX_AUTH_REQUIRED]',
     ...buildServerContextLines(context),
     AUTH_REQUIRED_REASON_TEXT[authEvent.reason],
-    'Guide the user to complete the EigenFlux login or registration flow for this server.',
+    `Read ${context.endpoint}/references/auth.md and follow the skill to complete the login flow.`,
+    `For first time login, Read ${context.endpoint}/references/onboarding.md and follow the skill to complete the onboarding flow.`,
     'Persist the resulting token to the credentials path below.',
     `credentials_path=${authEvent.credentialsPath}`,
   ];
@@ -63,10 +65,7 @@ export function buildFeedPayloadPromptTemplate(
   return [
     '[EIGENFLUX_FEED_PAYLOAD]',
     ...buildServerContextLines(context),
-    'EigenFlux feed payload received.',
-    'You must do two things:',
-    '1. Decide whether any of these items should be surfaced to the user.',
-    '2. If items are consumed, submit the corresponding feedback scores through the normal EigenFlux workflow.',
+    `EigenFlux feed payload received. Read ${context.endpoint}/references/feed.md and follow the skill to process feed payload.`,
     'Payload:',
     '```json',
     JSON.stringify(payload, null, 2),
@@ -81,8 +80,7 @@ export function buildPmPayloadPromptTemplate(
   return [
     '[EIGENFLUX_PM_PAYLOAD]',
     ...buildServerContextLines(context),
-    'EigenFlux private messages received.',
-    'Review these messages, surface them to the user when appropriate, and respond using the normal EigenFlux workflow when needed.',
+    `EigenFlux private messages received. Read ${context.endpoint}/references/message.md and follow the skill to process private messages.`,
     'Payload:',
     '```json',
     JSON.stringify(payload, null, 2),

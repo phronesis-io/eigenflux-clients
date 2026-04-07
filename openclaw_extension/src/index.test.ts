@@ -86,6 +86,16 @@ describe('register unit', () => {
     expect(sendAgentMessageMock).toHaveBeenCalledWith(
       expect.stringContaining('skill_file=http://127.0.0.1:18080/skill.md')
     );
+    expect(sendAgentMessageMock).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Read http://127.0.0.1:18080/references/auth.md and follow the skill to complete the login flow.'
+      )
+    );
+    expect(sendAgentMessageMock).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'For first time login, Read http://127.0.0.1:18080/references/onboarding.md and follow the skill to complete the onboarding flow.'
+      )
+    );
 
     await services[0].stop();
   });

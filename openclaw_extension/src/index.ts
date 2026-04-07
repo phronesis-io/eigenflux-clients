@@ -149,6 +149,7 @@ function createServerRuntime(
 
   const getPromptContext = (): EigenFluxPromptServerContext => ({
     serverName: server.name,
+    endpoint: server.endpoint,
     workdir: server.workdir,
     skillPath: resolveServerSkillPath(server),
   });
