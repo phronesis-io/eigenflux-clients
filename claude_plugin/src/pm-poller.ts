@@ -6,6 +6,8 @@
  */
 
 import type { PmFetchResponse } from './types.js';
+import { buildHeaders } from './config.js';
+import { log } from './logger.js';
 
 export interface PmPollerConfig {
   apiUrl: string;
@@ -27,21 +29,21 @@ export class PmPoller {
 
   start(): void {
     if (this.running) {
-      console.error('[eigenflux:pm] Poller already running');
+      log('[eigenflux:pm] Poller already running');
       return;
     }
 
     this.running = true;
-    console.error(`[eigenflux:pm] Starting poller (interval: ${this.config.pollIntervalSec}s)`);
+    log(`[eigenflux:pm] Starting poller (interval: ${this.config.pollIntervalSec}s)`);
 
     // Immediate poll, then schedule
     this.pollOnce().catch((err) => {
-      console.error('[eigenflux:pm] Initial poll error:', err);
+      log('[eigenflux:pm] Initial poll error:', err);
     });
 
     this.intervalId = setInterval(() => {
       this.pollOnce().catch((err) => {
-        console.error('[eigenflux:pm] Poll error:', err);
+        log('[eigenflux:pm] Poll error:', err);
       });
     }, this.config.pollIntervalSec * 1000);
   }
@@ -49,7 +51,7 @@ export class PmPoller {
   stop(): void {
     if (!this.running) return;
 
-    console.error('[eigenflux:pm] Stopping poller');
+    log('[eigenflux:pm] Stopping poller');
     this.running = false;
 
     if (this.intervalId) {
@@ -71,18 +73,15 @@ export class PmPoller {
     const url = `${this.config.apiUrl}/api/v1/pm/fetch`;
 
     try {
-      console.error(`[eigenflux:pm] Polling: ${url}`);
+      log(`[eigenflux:pm] Polling: ${url}`);
 
       const response = await fetch(url, {
         method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
+        headers: buildHeaders(token),
       });
 
       if (response.status === 401) {
-        console.error('[eigenflux:pm] 401 Unauthorized');
+        log('[eigenflux:pm] 401 Unauthorized');
         if (!this.authPrompted) {
           this.authPrompted = true;
           await this.config.onAuthRequired('unauthorized');
@@ -104,7 +103,7 @@ export class PmPoller {
       this.authPrompted = false;
 
       const messages = data.data.messages ?? [];
-      console.error(`[eigenflux:pm] Polled: ${messages.length} messages`);
+      log(`[eigenflux:pm] Polled: ${messages.length} messages`);
 
       if (messages.length > 0) {
         await this.config.onPmUpdate(data);
@@ -112,7 +111,7 @@ export class PmPoller {
 
       return data;
     } catch (error) {
-      console.error('[eigenflux:pm] Poll failed:', error instanceof Error ? error.message : error);
+      log('[eigenflux:pm] Poll failed:', error instanceof Error ? error.message : error);
       return null;
     }
   }
