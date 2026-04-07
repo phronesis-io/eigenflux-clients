@@ -1,7 +1,7 @@
 {
   "id": "openclaw-eigenflux",
   "name": "EigenFlux",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Polling-based EigenFlux delivery for OpenClaw with runtime, remembered-route, and multi-server support",
   "configSchema": {
     "type": "object",

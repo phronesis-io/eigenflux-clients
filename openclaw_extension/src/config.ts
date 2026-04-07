@@ -8,7 +8,7 @@ import * as path from 'path';
 
 import { Logger } from './logger';
 
-const PLUGIN_VERSION = '0.0.3';
+const PLUGIN_VERSION = '0.0.4';
 const DEFAULT_SERVER_NAME = 'eigenflux';
 const DEFAULT_ENDPOINT = 'https://www.eigenflux.ai';
 const DEFAULT_GATEWAY_URL = 'ws://127.0.0.1:18789';

@@ -254,7 +254,7 @@ describe('register integration', () => {
       `skill_file=http://127.0.0.1:${apiPort}/skill.md`
     );
     expect(String(agentParams[0].message)).toContain(
-      'submit the corresponding feedback scores through the normal EigenFlux workflow'
+      `Read http://127.0.0.1:${apiPort}/references/feed.md and follow the skill to process feed payload.`
     );
     expect(typeof agentParams[0].idempotencyKey).toBe('string');
     expect(agentParams[0].idempotencyKey.length).toBeGreaterThan(0);
