@@ -6,6 +6,61 @@
 import { execEigenflux } from './cli-executor';
 import { Logger } from './logger';
 
+export const POLL_INTERVAL_CONFIG_KEY = 'feed_poll_interval';
+export const DEFAULT_POLL_INTERVAL_SEC = 600;
+export const MIN_POLL_INTERVAL_SEC = 10;
+export const MAX_POLL_INTERVAL_SEC = 24 * 60 * 60;
+
+/**
+ * Reads the feed poll interval (in seconds) from the eigenflux CLI config
+ * (`eigenflux config get --key feed_poll_interval`). Values are stored as
+ * decimal-string seconds per the config KV conventions. Falls back to 600
+ * (10 minutes) when the key is unset, the value is invalid, out of the
+ * supported range [10s, 86400s], or the CLI call fails.
+ */
+export async function readPollIntervalSec(
+  eigenfluxBin: string,
+  serverName: string,
+  logger: Logger
+): Promise<number> {
+  const result = await execEigenflux<unknown>(
+    eigenfluxBin,
+    ['config', 'get', '--key', POLL_INTERVAL_CONFIG_KEY, '--server', serverName, '--format', 'json'],
+    { logger }
+  );
+
+  if (result.kind !== 'success' || result.data === undefined || result.data === null) {
+    return DEFAULT_POLL_INTERVAL_SEC;
+  }
+
+  let numeric: number | undefined;
+  if (typeof result.data === 'number' && Number.isFinite(result.data)) {
+    numeric = result.data;
+  } else if (typeof result.data === 'string') {
+    const parsed = Number(result.data.trim());
+    if (Number.isFinite(parsed)) {
+      numeric = parsed;
+    }
+  }
+
+  if (numeric === undefined) {
+    logger.warn(
+      `Ignoring non-numeric pollInterval from eigenflux config (server=${serverName}, value=${JSON.stringify(result.data)}); using ${DEFAULT_POLL_INTERVAL_SEC}s`
+    );
+    return DEFAULT_POLL_INTERVAL_SEC;
+  }
+
+  const floored = Math.floor(numeric);
+  if (floored < MIN_POLL_INTERVAL_SEC || floored > MAX_POLL_INTERVAL_SEC) {
+    logger.warn(
+      `pollInterval ${floored}s from eigenflux config (server=${serverName}) is outside [${MIN_POLL_INTERVAL_SEC}s, ${MAX_POLL_INTERVAL_SEC}s]; using ${DEFAULT_POLL_INTERVAL_SEC}s`
+    );
+    return DEFAULT_POLL_INTERVAL_SEC;
+  }
+
+  return floored;
+}
+
 export interface FeedItem {
   item_id: string;
   summary?: string;
@@ -40,7 +95,12 @@ export interface FeedResponse {
 export interface PollingClientConfig {
   serverName: string;
   eigenfluxBin: string;
-  pollIntervalSec: number;
+  /**
+   * Resolves the seconds to wait before the next poll. Invoked after every
+   * poll completes so the interval can be changed at runtime via the
+   * eigenflux CLI config (`pollInterval` key).
+   */
+  resolvePollIntervalSec: () => Promise<number>;
   logger: Logger;
   onFeedPolled: (payload: FeedResponse) => Promise<void>;
   onAuthRequired: (event: AuthRequiredEvent) => Promise<void>;
@@ -71,7 +131,7 @@ export interface PollOnceOptions {
 
 export class EigenFluxPollingClient {
   private config: PollingClientConfig;
-  private intervalId: NodeJS.Timeout | null = null;
+  private timeoutId: NodeJS.Timeout | null = null;
   private isRunning = false;
   private activePoll: Promise<PollResult> | null = null;
 
@@ -87,18 +147,13 @@ export class EigenFluxPollingClient {
 
     this.isRunning = true;
     this.config.logger.info(
-      `Starting polling client for server=${this.config.serverName} (interval: ${this.config.pollIntervalSec}s)`
+      `Starting polling client for server=${this.config.serverName}`
     );
 
-    // Initial fetch
+    // Initial fetch, then self-schedule subsequent polls using the interval
+    // freshly resolved from the eigenflux CLI config after each run.
     await this.pollOnce();
-
-    // Schedule periodic polling
-    this.intervalId = setInterval(() => {
-      this.pollOnce().catch((err) => {
-        this.config.logger.error(`Polling error: ${err instanceof Error ? err.message : String(err)}`);
-      });
-    }, this.config.pollIntervalSec * 1000);
+    this.scheduleNext();
   }
 
   stop(): void {
@@ -109,10 +164,46 @@ export class EigenFluxPollingClient {
     this.config.logger.info(`Stopping polling client for server=${this.config.serverName}`);
     this.isRunning = false;
 
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    if (this.timeoutId) {
+      clearTimeout(this.timeoutId);
+      this.timeoutId = null;
     }
+  }
+
+  private async scheduleNext(): Promise<void> {
+    if (!this.isRunning) {
+      return;
+    }
+
+    let intervalSec: number;
+    try {
+      intervalSec = await this.config.resolvePollIntervalSec();
+    } catch (error) {
+      this.config.logger.warn(
+        `Failed to resolve pollInterval for server=${this.config.serverName}: ${error instanceof Error ? error.message : String(error)}; using ${DEFAULT_POLL_INTERVAL_SEC}s`
+      );
+      intervalSec = DEFAULT_POLL_INTERVAL_SEC;
+    }
+
+    if (!this.isRunning) {
+      return;
+    }
+
+    this.config.logger.debug(
+      `Scheduling next feed poll for server=${this.config.serverName} in ${intervalSec}s`
+    );
+    this.timeoutId = setTimeout(() => {
+      this.timeoutId = null;
+      this.pollOnce()
+        .catch((err) => {
+          this.config.logger.error(
+            `Polling error: ${err instanceof Error ? err.message : String(err)}`
+          );
+        })
+        .finally(() => {
+          this.scheduleNext();
+        });
+    }, intervalSec * 1000);
   }
 
   async pollOnce(options: PollOnceOptions = {}): Promise<PollResult> {
@@ -140,6 +231,13 @@ export class EigenFluxPollingClient {
             await this.config.onAuthRequired(authEvent);
           }
           return { kind: 'auth_required', authEvent };
+        }
+
+        if (result.kind === 'not_installed') {
+          return {
+            kind: 'error',
+            error: new Error(`eigenflux CLI not installed (bin=${result.bin})`),
+          };
         }
 
         if (result.kind === 'error') {

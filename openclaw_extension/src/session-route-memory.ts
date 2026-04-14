@@ -1,7 +1,8 @@
-import * as fs from 'fs';
-import * as path from 'path';
 import { Logger } from './logger';
 import { normalizeReplyTarget } from './reply-target';
+import { execEigenflux } from './cli-executor';
+
+export const DELIVER_SESSION_KEY = 'openclaw_deliver_session';
 
 export type StoredNotificationRoute = {
   sessionKey: string;
@@ -24,77 +25,89 @@ function normalizeChannel(value: unknown): string | undefined {
   return readNonEmptyString(value)?.toLowerCase();
 }
 
-export function resolveSessionRouteMemoryPath(workdir: string): string {
-  return path.join(workdir, 'session.json');
-}
-
-export function readStoredNotificationRoute(
-  workdir: string | undefined,
+/**
+ * Reads the remembered delivery route for a server from the eigenflux CLI
+ * config store (`openclaw_deliver_session` key). Returns undefined when the
+ * key is unset or the CLI call fails.
+ */
+export async function readStoredNotificationRoute(
+  eigenfluxBin: string | undefined,
+  serverName: string | undefined,
   logger: Logger
-): StoredNotificationRoute | undefined {
-  const trimmedWorkdir = readNonEmptyString(workdir);
-  if (!trimmedWorkdir) {
+): Promise<StoredNotificationRoute | undefined> {
+  const bin = readNonEmptyString(eigenfluxBin);
+  const server = readNonEmptyString(serverName);
+  if (!bin || !server) {
     return undefined;
   }
 
-  const filePath = resolveSessionRouteMemoryPath(trimmedWorkdir);
-  try {
-    if (!fs.existsSync(filePath)) {
-      logger.info(`Remembered route file missing: path=${filePath}`);
-      return undefined;
-    }
+  const result = await execEigenflux<unknown>(
+    bin,
+    ['config', 'get', '--key', DELIVER_SESSION_KEY, '--server', server, '--format', 'json'],
+    { logger }
+  );
 
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return undefined;
+  if (result.kind !== 'success' || result.data === undefined) {
+    if (result.kind === 'error') {
+      logger.debug(
+        `readStoredNotificationRoute: eigenflux config get failed for server=${server}: ${result.error.message}`
+      );
     }
+    return undefined;
+  }
 
-    const record = parsed as Record<string, unknown>;
-    const sessionKey = readNonEmptyString(record.sessionKey);
-    const agentId = readNonEmptyString(record.agentId);
-    if (!sessionKey || !agentId) {
-      logger.warn(`Remembered route file is incomplete: path=${filePath}`);
-      return undefined;
-    }
+  const parsed = result.data;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return undefined;
+  }
 
-    const route = {
+  const record = parsed as Record<string, unknown>;
+  const sessionKey = readNonEmptyString(record.sessionKey);
+  const agentId = readNonEmptyString(record.agentId);
+  if (!sessionKey || !agentId) {
+    logger.warn(
+      `Remembered route entry for server=${server} is incomplete (sessionKey/agentId missing)`
+    );
+    return undefined;
+  }
+
+  const route: StoredNotificationRoute = {
+    sessionKey,
+    agentId,
+    replyChannel: normalizeChannel(record.replyChannel),
+    replyTo: normalizeReplyTarget(readNonEmptyString(record.replyTo), {
+      channel: normalizeChannel(record.replyChannel),
       sessionKey,
-      agentId,
-      replyChannel: normalizeChannel(record.replyChannel),
-      replyTo: normalizeReplyTarget(readNonEmptyString(record.replyTo), {
-        channel: normalizeChannel(record.replyChannel),
-        sessionKey,
-      }),
-      replyAccountId: readNonEmptyString(record.replyAccountId),
-      updatedAt:
-        typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt)
-          ? record.updatedAt
-          : 0,
-    };
-    logger.info(
-      `Remembered route loaded: path=${filePath}, session_key=${route.sessionKey}, agent_id=${route.agentId}, channel=${route.replyChannel ?? 'n/a'}, to=${route.replyTo ?? 'n/a'}, account=${route.replyAccountId ?? 'n/a'}`
-    );
-    return route;
-  } catch (error) {
-    logger.debug(
-      `Failed to read remembered session route ${filePath}: ${error instanceof Error ? error.message : String(error)}`
-    );
-    return undefined;
-  }
+    }),
+    replyAccountId: readNonEmptyString(record.replyAccountId),
+    updatedAt:
+      typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt)
+        ? record.updatedAt
+        : 0,
+  };
+  logger.info(
+    `Remembered route loaded: server=${server}, session_key=${route.sessionKey}, agent_id=${route.agentId}, channel=${route.replyChannel ?? 'n/a'}, to=${route.replyTo ?? 'n/a'}, account=${route.replyAccountId ?? 'n/a'}`
+  );
+  return route;
 }
 
-export function writeStoredNotificationRoute(
-  workdir: string | undefined,
+/**
+ * Persists the remembered delivery route for a server via the eigenflux CLI
+ * config store (`openclaw_deliver_session` key).
+ */
+export async function writeStoredNotificationRoute(
+  eigenfluxBin: string | undefined,
+  serverName: string | undefined,
   route: Omit<StoredNotificationRoute, 'updatedAt'>,
   logger: Logger
-): boolean {
-  const trimmedWorkdir = readNonEmptyString(workdir);
-  if (!trimmedWorkdir) {
+): Promise<boolean> {
+  const bin = readNonEmptyString(eigenfluxBin);
+  const server = readNonEmptyString(serverName);
+  if (!bin || !server) {
     return false;
   }
 
-  const filePath = resolveSessionRouteMemoryPath(trimmedWorkdir);
-  const payload: StoredNotificationRoute = {
+  const normalized = {
     sessionKey: route.sessionKey,
     agentId: route.agentId,
     replyChannel: normalizeChannel(route.replyChannel),
@@ -103,20 +116,54 @@ export function writeStoredNotificationRoute(
       sessionKey: route.sessionKey,
     }),
     replyAccountId: readNonEmptyString(route.replyAccountId),
-    updatedAt: Date.now(),
   };
 
-  try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
-    logger.info(
-      `Remembered route saved: path=${filePath}, session_key=${payload.sessionKey}, agent_id=${payload.agentId}, channel=${payload.replyChannel ?? 'n/a'}, to=${payload.replyTo ?? 'n/a'}, account=${payload.replyAccountId ?? 'n/a'}`
+  const existing = await readStoredNotificationRoute(bin, server, logger);
+  if (
+    existing &&
+    existing.sessionKey === normalized.sessionKey &&
+    existing.agentId === normalized.agentId &&
+    existing.replyChannel === normalized.replyChannel &&
+    existing.replyTo === normalized.replyTo &&
+    existing.replyAccountId === normalized.replyAccountId
+  ) {
+    logger.debug(
+      `Remembered route unchanged for server=${server} (session_key=${normalized.sessionKey}); skipping write`
     );
     return true;
-  } catch (error) {
+  }
+
+  const payload: StoredNotificationRoute = {
+    ...normalized,
+    updatedAt: Date.now(),
+  };
+  const value = JSON.stringify(payload);
+
+  const result = await execEigenflux<string>(
+    bin,
+    [
+      'config',
+      'set',
+      '--key',
+      DELIVER_SESSION_KEY,
+      '--value',
+      value,
+      '--server',
+      server,
+    ],
+    { logger, parseJson: false }
+  );
+
+  if (result.kind !== 'success') {
+    const detail = result.kind === 'error' ? result.error.message : result.kind;
     logger.warn(
-      `Failed to write remembered session route ${filePath}: ${error instanceof Error ? error.message : String(error)}`
+      `Failed to persist remembered session route via eigenflux config set (server=${server}): ${detail}`
     );
     return false;
   }
+
+  logger.info(
+    `Remembered route saved: server=${server}, session_key=${payload.sessionKey}, agent_id=${payload.agentId}, channel=${payload.replyChannel ?? 'n/a'}, to=${payload.replyTo ?? 'n/a'}, account=${payload.replyAccountId ?? 'n/a'}`
+  );
+  return true;
 }

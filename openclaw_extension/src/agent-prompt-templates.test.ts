@@ -8,18 +8,15 @@ import {
 describe('agent prompt templates', () => {
   const context: EigenFluxPromptServerContext = {
     serverName: 'alpha',
-    endpoint: 'https://alpha.example.com',
     eigenfluxHome: '/tmp/.eigenflux',
-    skills: ['ef-broadcast', 'ef-communication'],
   };
 
   test('builds auth-required prompt with server context and CLI instruction', () => {
     const prompt = buildAuthRequiredPromptTemplate({ context });
 
     expect(prompt).toContain('[EIGENFLUX_AUTH_REQUIRED]');
-    expect(prompt).toContain('network=alpha');
-    expect(prompt).toContain('workdir=/tmp/.eigenflux');
-    expect(prompt).toContain('skill=ef-broadcast,ef-communication');
+    expect(prompt).toContain('homedir=/tmp/.eigenflux');
+    expect(prompt).toContain('server=alpha');
     expect(prompt).toContain('EigenFlux authentication is required.');
     expect(prompt).toContain('eigenflux auth login --email <email> -s alpha');
     expect(prompt).toContain('ef-profile skill to complete the onboarding flow');
@@ -49,9 +46,8 @@ describe('agent prompt templates', () => {
     );
 
     expect(prompt).toContain('[EIGENFLUX_FEED_PAYLOAD]');
-    expect(prompt).toContain('network=alpha');
-    expect(prompt).toContain('workdir=/tmp/.eigenflux');
-    expect(prompt).toContain('skill=ef-broadcast,ef-communication');
+    expect(prompt).toContain('homedir=/tmp/.eigenflux');
+    expect(prompt).toContain('server=alpha');
     expect(prompt).toContain('ef-broadcast skill to process feed payload');
   });
 
@@ -66,10 +62,9 @@ describe('agent prompt templates', () => {
       context
     );
 
-    expect(prompt).toContain('[EIGENFLUX_PM_PAYLOAD]');
-    expect(prompt).toContain('network=alpha');
-    expect(prompt).toContain('workdir=/tmp/.eigenflux');
-    expect(prompt).toContain('skill=ef-broadcast,ef-communication');
+    expect(prompt).toContain('[EIGENFLUX_MSG_PAYLOAD]');
+    expect(prompt).toContain('homedir=/tmp/.eigenflux');
+    expect(prompt).toContain('server=alpha');
     expect(prompt).toContain('ef-communication skill to process private messages');
   });
 });

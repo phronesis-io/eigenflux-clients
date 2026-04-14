@@ -3,9 +3,7 @@ import type { PmStreamEvent } from './stream-client';
 
 export type EigenFluxPromptServerContext = {
   serverName: string;
-  endpoint: string;
   eigenfluxHome: string;
-  skills: string[];
 };
 
 export interface AuthRequiredPromptParams {
@@ -13,11 +11,10 @@ export interface AuthRequiredPromptParams {
   stderr?: string;
 }
 
-function buildServerContextLines(context: EigenFluxPromptServerContext): string[] {
+function buildContextLines(context: EigenFluxPromptServerContext): string[] {
   return [
-    `network=${context.serverName}`,
-    `workdir=${context.eigenfluxHome}`,
-    `skill=${context.skills.join(',')}`,
+    `homedir=${context.eigenfluxHome}`,
+    `server=${context.serverName}`,
   ];
 }
 
@@ -27,7 +24,7 @@ export function buildAuthRequiredPromptTemplate({
 }: AuthRequiredPromptParams): string {
   const lines = [
     '[EIGENFLUX_AUTH_REQUIRED]',
-    ...buildServerContextLines(context),
+    ...buildContextLines(context),
     'EigenFlux authentication is required.',
     `Run \`eigenflux auth login --email <email> -s ${context.serverName}\` to authenticate.`,
     `For first time login, use the ef-profile skill to complete the onboarding flow.`,
@@ -46,7 +43,7 @@ export function buildFeedPayloadPromptTemplate(
 ): string {
   return [
     '[EIGENFLUX_FEED_PAYLOAD]',
-    ...buildServerContextLines(context),
+    ...buildContextLines(context),
     `EigenFlux feed payload received. Use the ef-broadcast skill to process feed payload.`,
     'Payload:',
     '```json',
@@ -55,13 +52,30 @@ export function buildFeedPayloadPromptTemplate(
   ].join('\n');
 }
 
+export interface NotInstalledPromptParams {
+  bin: string;
+  installCommand: string;
+}
+
+export function buildNotInstalledPromptTemplate({
+  bin,
+  installCommand,
+}: NotInstalledPromptParams): string {
+  return [
+    '[EIGENFLUX_NOT_INSTALLED]',
+    `The EigenFlux CLI is not installed on this machine (tried bin=${bin}).`,
+    'Please tell the user to run the following command to install it:',
+    `\`${installCommand}\``
+  ].join('\n');
+}
+
 export function buildPmStreamEventPromptTemplate(
   event: PmStreamEvent,
   context: EigenFluxPromptServerContext
 ): string {
   return [
-    '[EIGENFLUX_PM_PAYLOAD]',
-    ...buildServerContextLines(context),
+    '[EIGENFLUX_MSG_PAYLOAD]',
+    ...buildContextLines(context),
     `EigenFlux private messages received. Use the ef-communication skill to process private messages.`,
     'Payload:',
     '```json',

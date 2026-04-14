@@ -13,17 +13,6 @@ jest.mock('os', () => {
   };
 });
 
-const sendAgentMessageMock = jest.fn().mockResolvedValue({
-  sessionKey: 'main',
-  runId: 'run-test',
-});
-
-jest.mock('./gateway-rpc-client', () => ({
-  OpenClawGatewayRpcClient: jest.fn().mockImplementation(() => ({
-    sendAgentMessage: sendAgentMessageMock,
-  })),
-}));
-
 // Mock discoverServers and resolveEigenfluxHome from config
 const discoverServersMock = jest.fn();
 const resolveEigenfluxHomeMock = jest.fn();
@@ -102,6 +91,9 @@ describe('register unit', () => {
     // Reset captured callbacks
     capturedPollOnFeedPolled = null;
     capturedPollOnAuthRequired = null;
+
+    // Default eigenflux CLI response so session-route-memory reads succeed (unset key).
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: undefined });
   });
 
   afterEach(() => {
@@ -109,14 +101,14 @@ describe('register unit', () => {
     fs.rmSync(homeDir, { recursive: true, force: true });
   });
 
-  test('sends auth prompt through gateway fallback when service starts without token', async () => {
+  test('sends auth prompt through runtime.subagent when service starts without token', async () => {
     const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
     fs.mkdirSync(serverDir, { recursive: true });
     // No credentials.json, so auth is required
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true },
-    ]);
+    ] });
 
     // When the polling client starts, it will call pollOnce, which triggers onAuthRequired
     pollingClientStartMock.mockImplementation(async () => {
@@ -127,13 +119,14 @@ describe('register unit', () => {
 
     const { default: plugin } = await import('./index');
     const services: any[] = [];
+    const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-auth' });
 
     plugin.register({
       config: {},
-      pluginConfig: {
-        gatewayUrl: 'ws://127.0.0.1:18789',
+      pluginConfig: {},
+      runtime: {
+        subagent: { run: subagentRun },
       },
-      runtime: {},
       logger: createLogger(),
       registerService: (service: any) => services.push(service),
       registerCommand: jest.fn(),
@@ -147,18 +140,17 @@ describe('register unit', () => {
 
     await services[0].start();
 
-    expect(sendAgentMessageMock).toHaveBeenCalledWith(
-      expect.stringContaining('[EIGENFLUX_AUTH_REQUIRED]')
+    expect(subagentRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: 'main',
+        message: expect.stringContaining('[EIGENFLUX_AUTH_REQUIRED]'),
+        deliver: true,
+      })
     );
-    expect(sendAgentMessageMock).toHaveBeenCalledWith(
-      expect.stringContaining('network=eigenflux')
-    );
-    expect(sendAgentMessageMock).toHaveBeenCalledWith(
-      expect.stringContaining(`workdir=${eigenfluxHome}`)
-    );
-    expect(sendAgentMessageMock).toHaveBeenCalledWith(
-      expect.stringContaining('eigenflux auth login --email <email> -s eigenflux')
-    );
+    const promptMessage = String(subagentRun.mock.calls[0]?.[0]?.message);
+    expect(promptMessage).toContain('server=eigenflux');
+    expect(promptMessage).toContain(`homedir=${eigenfluxHome}`);
+    expect(promptMessage).toContain('eigenflux auth login --email <email> -s eigenflux');
 
     await services[0].stop();
   });
@@ -172,9 +164,9 @@ describe('register unit', () => {
       'utf-8'
     );
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true },
-    ]);
+    ] });
 
     const { default: plugin } = await import('./index');
     const services: any[] = [];
@@ -209,9 +201,9 @@ describe('register unit', () => {
     const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
     fs.mkdirSync(serverDir, { recursive: true });
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true },
-    ]);
+    ] });
 
     execEigenfluxMock.mockResolvedValue({
       kind: 'success',
@@ -254,9 +246,9 @@ describe('register unit', () => {
     const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
     fs.mkdirSync(serverDir, { recursive: true });
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true },
-    ]);
+    ] });
 
     pollingClientPollOnceMock.mockResolvedValue({
       kind: 'success',
@@ -305,9 +297,9 @@ describe('register unit', () => {
     const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
     fs.mkdirSync(serverDir, { recursive: true });
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true },
-    ]);
+    ] });
 
     const { default: plugin } = await import('./index');
     const services: any[] = [];
@@ -352,10 +344,19 @@ describe('register unit', () => {
     );
     expect(hereResp.text).toContain('sessionKey: agent:mengtian:feishu:direct:ou_current');
 
-    const sessionFilePath = path.join(serverDir, 'session.json');
-    const remembered = JSON.parse(
-      fs.readFileSync(sessionFilePath, 'utf-8')
-    ) as Record<string, unknown>;
+    // Persistence now happens via `eigenflux config set --key openclaw_deliver_session`
+    const configSetCall = execEigenfluxMock.mock.calls.find(([, args]: any[]) =>
+      Array.isArray(args) &&
+      args[0] === 'config' &&
+      args[1] === 'set' &&
+      args.includes('openclaw_deliver_session')
+    );
+    expect(configSetCall).toBeDefined();
+    const [, argv] = configSetCall!;
+    const valueIndex = argv.indexOf('--value') + 1;
+    const serverIndex = argv.indexOf('--server') + 1;
+    expect(argv[serverIndex]).toBe('eigenflux');
+    const remembered = JSON.parse(argv[valueIndex]) as Record<string, unknown>;
     expect(remembered.sessionKey).toBe('agent:mengtian:feishu:direct:ou_current');
     expect(remembered.agentId).toBe('mengtian');
     expect(remembered.replyChannel).toBe('feishu');
@@ -369,9 +370,9 @@ describe('register unit', () => {
     const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
     fs.mkdirSync(serverDir, { recursive: true });
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true },
-    ]);
+    ] });
 
     pollingClientStartMock.mockImplementation(async () => {
       if (capturedPollOnAuthRequired) {
@@ -404,7 +405,6 @@ describe('register unit', () => {
       deliver: true,
       idempotencyKey: expect.any(String),
     });
-    expect(sendAgentMessageMock).not.toHaveBeenCalled();
 
     await services[0].stop();
   });
@@ -415,10 +415,10 @@ describe('register unit', () => {
     fs.mkdirSync(eigenfluxDir, { recursive: true });
     fs.mkdirSync(alphaDir, { recursive: true });
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'https://www.eigenflux.ai', current: true },
       { name: 'alpha', endpoint: 'https://alpha.example.com', current: false },
-    ]);
+    ] });
 
     const { default: plugin } = await import('./index');
     const services: any[] = [];
@@ -455,10 +455,10 @@ describe('register unit', () => {
       'utf-8'
     );
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'https://www.eigenflux.ai', current: true },
       { name: 'alpha', endpoint: 'http://127.0.0.1:18080', current: false },
-    ]);
+    ] });
 
     const { default: plugin } = await import('./index');
     const services: any[] = [];
@@ -492,9 +492,9 @@ describe('register unit', () => {
     const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
     fs.mkdirSync(serverDir, { recursive: true });
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true },
-    ]);
+    ] });
     streamClientIsRunningMock.mockReturnValue(true);
     streamClientGetLastCursorMock.mockReturnValue('cursor-123');
 
@@ -519,6 +519,54 @@ describe('register unit', () => {
     expect(pmResp.text).toContain('EigenFlux PM stream status (server=eigenflux):');
     expect(pmResp.text).toContain('streaming: active');
     expect(pmResp.text).toContain('last_cursor: cursor-123');
+
+    await services[0].stop();
+  });
+
+  test('delivers install prompt when eigenflux CLI is not installed', async () => {
+    discoverServersMock.mockResolvedValue({
+      kind: 'not_installed',
+      bin: 'eigenflux',
+    });
+
+    const { default: plugin } = await import('./index');
+    const services: any[] = [];
+    const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-install' });
+
+    plugin.register({
+      config: {},
+      pluginConfig: {},
+      runtime: {
+        subagent: { run: subagentRun },
+      },
+      logger: createLogger(),
+      registerService: (service: any) => services.push(service),
+      registerCommand: jest.fn(),
+      registerHook: jest.fn(),
+      on: jest.fn(),
+    } as any);
+
+    await services[0].start();
+
+    expect(pollingClientStartMock).not.toHaveBeenCalled();
+    expect(streamClientStartMock).not.toHaveBeenCalled();
+    expect(
+      fs.existsSync(path.join(eigenfluxHome, 'bootstrap'))
+    ).toBe(false);
+    expect(subagentRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('[EIGENFLUX_NOT_INSTALLED]'),
+        deliver: true,
+      })
+    );
+    expect(String(subagentRun.mock.calls[0]?.[0]?.message)).toContain(
+      'curl -fsSL https://eigenflux.ai/install.sh | bash'
+    );
+    expect(subagentRun).toHaveBeenCalledTimes(1);
+
+    // second start should not deliver again (guarded) unless stop() resets it
+    await services[0].start();
+    expect(subagentRun).toHaveBeenCalledTimes(1);
 
     await services[0].stop();
   });

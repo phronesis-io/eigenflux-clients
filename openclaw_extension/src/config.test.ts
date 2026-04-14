@@ -1,65 +1,28 @@
 import * as os from 'os';
 
+const execEigenfluxMock = jest.fn();
+jest.mock('./cli-executor', () => ({
+  execEigenflux: (...args: any[]) => execEigenfluxMock(...args),
+}));
+
 import {
   PLUGIN_CONFIG,
   resolvePluginConfig,
   resolveEigenfluxHome,
+  discoverServers,
 } from './config';
-import { Logger } from './logger';
 
 const packageManifest = require('../package.json') as { version: string };
 const pluginManifest = require('../openclaw.plugin.json') as { version: string };
-
-function createLoggerSpies() {
-  return {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-  };
-}
 
 describe('resolvePluginConfig', () => {
   test('returns defaults when config is empty', () => {
     const config = resolvePluginConfig({});
 
     expect(config.eigenfluxBin).toBe(PLUGIN_CONFIG.DEFAULT_EIGENFLUX_BIN);
-    expect(config.feedPollIntervalSec).toBe(PLUGIN_CONFIG.DEFAULT_FEED_POLL_INTERVAL_SEC);
     expect(config.skills).toEqual(['ef-broadcast', 'ef-communication']);
-    expect(config.gatewayUrl).toBe(PLUGIN_CONFIG.DEFAULT_GATEWAY_URL);
     expect(config.openclawCliBin).toBe(PLUGIN_CONFIG.DEFAULT_OPENCLAW_CLI_BIN);
     expect(config.serverRouting).toEqual({});
-    expect(config.gatewayToken).toBeUndefined();
-  });
-
-  test('uses gateway auth token from host config when plugin config omits it', () => {
-    const config = resolvePluginConfig(
-      {},
-      {
-        gateway: {
-          auth: {
-            token: 'gw_host_token',
-          },
-        },
-      }
-    );
-
-    expect(config.gatewayToken).toBe('gw_host_token');
-  });
-
-  test('plugin-level gatewayToken overrides host config token', () => {
-    const config = resolvePluginConfig(
-      { gatewayToken: 'plugin_token' },
-      {
-        gateway: {
-          auth: {
-            token: 'gw_host_token',
-          },
-        },
-      }
-    );
-
-    expect(config.gatewayToken).toBe('plugin_token');
   });
 
   test('resolves custom eigenfluxBin and openclawCliBin', () => {
@@ -126,33 +89,6 @@ describe('resolvePluginConfig', () => {
     });
   });
 
-  test('clamps oversized feedPollInterval to one day and logs a warning', () => {
-    const loggerSpies = createLoggerSpies();
-    const config = resolvePluginConfig(
-      { feedPollInterval: 3600000 },
-      undefined,
-      new Logger(loggerSpies)
-    );
-
-    expect(config.feedPollIntervalSec).toBe(PLUGIN_CONFIG.MAX_POLL_INTERVAL_SEC);
-    expect(loggerSpies.warn).toHaveBeenCalledWith(
-      expect.stringContaining('feedPollInterval exceeds 86400s; clamping to 86400s')
-    );
-  });
-
-  test('clamps undersized feedPollInterval to ten seconds and logs a warning', () => {
-    const loggerSpies = createLoggerSpies();
-    const config = resolvePluginConfig(
-      { feedPollInterval: 1 },
-      undefined,
-      new Logger(loggerSpies)
-    );
-
-    expect(config.feedPollIntervalSec).toBe(PLUGIN_CONFIG.MIN_POLL_INTERVAL_SEC);
-    expect(loggerSpies.warn).toHaveBeenCalledWith(
-      expect.stringContaining('feedPollInterval is below 10s; clamping to 10s')
-    );
-  });
 });
 
 describe('resolveEigenfluxHome', () => {
@@ -188,6 +124,40 @@ describe('resolveEigenfluxHome', () => {
   });
 });
 
+describe('discoverServers', () => {
+  beforeEach(() => {
+    execEigenfluxMock.mockReset();
+  });
+
+  test('calls eigenflux with server list --format json', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: [] });
+    await discoverServers('eigenflux');
+    expect(execEigenfluxMock).toHaveBeenCalledWith(
+      'eigenflux',
+      ['server', 'list', '--format', 'json'],
+      expect.any(Object)
+    );
+  });
+
+  test('returns ok with parsed servers on success', async () => {
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'success',
+      data: [{ name: 'eigenflux', endpoint: 'https://x', current: true }],
+    });
+    const result = await discoverServers('eigenflux');
+    expect(result).toEqual({
+      kind: 'ok',
+      servers: [{ name: 'eigenflux', endpoint: 'https://x', current: true }],
+    });
+  });
+
+  test('surfaces not_installed when the executor reports it', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'not_installed', bin: 'eigenflux' });
+    const result = await discoverServers('eigenflux');
+    expect(result).toEqual({ kind: 'not_installed', bin: 'eigenflux' });
+  });
+});
+
 describe('PLUGIN_CONFIG metadata', () => {
   test('keeps runtime metadata aligned with manifests', () => {
     expect(PLUGIN_CONFIG.PLUGIN_VERSION).toBe(packageManifest.version);
@@ -197,11 +167,7 @@ describe('PLUGIN_CONFIG metadata', () => {
 
   test('exports expected constant keys', () => {
     expect(PLUGIN_CONFIG.DEFAULT_EIGENFLUX_BIN).toBe('eigenflux');
-    expect(PLUGIN_CONFIG.DEFAULT_GATEWAY_URL).toBeDefined();
     expect(PLUGIN_CONFIG.DEFAULT_SESSION_KEY).toBe('main');
     expect(PLUGIN_CONFIG.DEFAULT_AGENT_ID).toBe('main');
-    expect(PLUGIN_CONFIG.DEFAULT_FEED_POLL_INTERVAL_SEC).toBeGreaterThan(0);
-    expect(PLUGIN_CONFIG.MIN_POLL_INTERVAL_SEC).toBe(10);
-    expect(PLUGIN_CONFIG.MAX_POLL_INTERVAL_SEC).toBe(86400);
   });
 });

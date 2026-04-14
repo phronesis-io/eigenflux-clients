@@ -1,7 +1,7 @@
 {
   "id": "openclaw-eigenflux",
   "name": "EigenFlux",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "CLI-based EigenFlux delivery for OpenClaw with server discovery, feed polling, and PM streaming",
   "configSchema": {
     "type": "object",
@@ -12,46 +12,10 @@
         "description": "Path to the eigenflux CLI binary",
         "default": "eigenflux"
       },
-      "feedPollInterval": {
-        "type": "integer",
-        "minimum": 10,
-        "maximum": 86400,
-        "description": "Feed polling interval in seconds",
-        "default": 300
-      },
-      "skills": {
-        "type": "array",
-        "items": { "type": "string" },
-        "description": "EigenFlux skill names bundled with the plugin",
-        "default": ["ef-broadcast", "ef-communication"]
-      },
-      "gatewayUrl": {
-        "type": "string",
-        "description": "OpenClaw Gateway WebSocket URL used for Gateway RPC fallback",
-        "default": "ws://127.0.0.1:18789"
-      },
-      "gatewayToken": {
-        "type": "string",
-        "description": "Optional gateway token override used for Gateway RPC fallback"
-      },
       "openclawCliBin": {
         "type": "string",
         "description": "OpenClaw CLI binary used by runtime command fallbacks",
         "default": "openclaw"
-      },
-      "serverRouting": {
-        "type": "object",
-        "description": "Per-server notification routing overrides keyed by server name",
-        "additionalProperties": {
-          "type": "object",
-          "properties": {
-            "sessionKey": { "type": "string" },
-            "agentId": { "type": "string" },
-            "replyChannel": { "type": "string" },
-            "replyTo": { "type": "string" },
-            "replyAccountId": { "type": "string" }
-          }
-        }
       }
     }
   }

@@ -1,4 +1,10 @@
-import { EigenFluxPollingClient } from './polling-client';
+import {
+  EigenFluxPollingClient,
+  readPollIntervalSec,
+  DEFAULT_POLL_INTERVAL_SEC,
+  MIN_POLL_INTERVAL_SEC,
+  MAX_POLL_INTERVAL_SEC,
+} from './polling-client';
 import { Logger } from './logger';
 import type { CliResult } from './cli-executor';
 
@@ -67,7 +73,7 @@ describe('EigenFluxPollingClient', () => {
     const client = new EigenFluxPollingClient({
       serverName: 'eigenflux',
       eigenfluxBin: 'eigenflux',
-      pollIntervalSec: 60,
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
       logger: createLogger(),
       onFeedPolled,
       onAuthRequired,
@@ -101,7 +107,6 @@ describe('EigenFluxPollingClient', () => {
     );
     expect(onAuthRequired).not.toHaveBeenCalled();
 
-    // Verify CLI was called with correct arguments
     expect(execEigenfluxMock).toHaveBeenCalledWith(
       'eigenflux',
       ['feed', 'poll', '--limit', '20', '--action', 'refresh', '-s', 'eigenflux', '-f', 'json'],
@@ -121,7 +126,7 @@ describe('EigenFluxPollingClient', () => {
     const client = new EigenFluxPollingClient({
       serverName: 'eigenflux',
       eigenfluxBin: 'eigenflux',
-      pollIntervalSec: 60,
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
       logger: createLogger(),
       onFeedPolled,
       onAuthRequired,
@@ -154,7 +159,7 @@ describe('EigenFluxPollingClient', () => {
     const client = new EigenFluxPollingClient({
       serverName: 'eigenflux',
       eigenfluxBin: 'eigenflux',
-      pollIntervalSec: 60,
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
       logger: createLogger(loggerSpies),
       onFeedPolled: jest.fn().mockResolvedValue(undefined),
       onAuthRequired: jest.fn().mockResolvedValue(undefined),
@@ -174,7 +179,7 @@ describe('EigenFluxPollingClient', () => {
     const client = new EigenFluxPollingClient({
       serverName: 'eigenflux',
       eigenfluxBin: 'eigenflux',
-      pollIntervalSec: 60,
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
       logger: createLogger(loggerSpies),
       onFeedPolled: jest.fn().mockResolvedValue(undefined),
       onAuthRequired: jest.fn().mockResolvedValue(undefined),
@@ -211,7 +216,7 @@ describe('EigenFluxPollingClient', () => {
     const client = new EigenFluxPollingClient({
       serverName: 'eigenflux',
       eigenfluxBin: 'eigenflux',
-      pollIntervalSec: 60,
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
       logger: createLogger(),
       onFeedPolled,
       onAuthRequired: jest.fn().mockResolvedValue(undefined),
@@ -221,5 +226,116 @@ describe('EigenFluxPollingClient', () => {
 
     expect(result.kind).toBe('success');
     expect(onFeedPolled).not.toHaveBeenCalled();
+  });
+
+  test('re-resolves pollInterval after every poll and reschedules with the new value', async () => {
+    jest.useFakeTimers();
+    try {
+      execEigenfluxMock.mockResolvedValue({
+        kind: 'success',
+        data: { items: [], has_more: false, notifications: [] },
+      } as CliResult<any>);
+
+      const resolvePollIntervalSec = jest
+        .fn<Promise<number>, []>()
+        .mockResolvedValueOnce(30)
+        .mockResolvedValueOnce(90);
+
+      const client = new EigenFluxPollingClient({
+        serverName: 'eigenflux',
+        eigenfluxBin: 'eigenflux',
+        resolvePollIntervalSec,
+        logger: createLogger(),
+        onFeedPolled: jest.fn().mockResolvedValue(undefined),
+        onAuthRequired: jest.fn().mockResolvedValue(undefined),
+      });
+
+      await client.start();
+      // Initial poll + first scheduleNext should have consulted the resolver once.
+      expect(resolvePollIntervalSec).toHaveBeenCalledTimes(1);
+      expect(execEigenfluxMock).toHaveBeenCalledTimes(1);
+
+      // Fire the first scheduled timer → triggers second poll, then resolver again.
+      await jest.advanceTimersByTimeAsync(30_000);
+      // flush pending microtasks after setTimeout callback so scheduleNext() runs
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(execEigenfluxMock).toHaveBeenCalledTimes(2);
+      expect(resolvePollIntervalSec).toHaveBeenCalledTimes(2);
+
+      client.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('readPollIntervalSec', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test('returns numeric value from CLI when within range', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: 120 } as CliResult<any>);
+
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(120);
+    expect(execEigenfluxMock).toHaveBeenCalledWith(
+      'eigenflux',
+      ['config', 'get', '--key', 'feed_poll_interval', '--server', 'eigenflux', '--format', 'json'],
+      expect.any(Object)
+    );
+  });
+
+  test('parses numeric string values from CLI', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: '45' } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(45);
+  });
+
+  test('falls back to default when CLI returns no value', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: undefined } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
+  });
+
+  test('falls back to default when CLI errors out', async () => {
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'error',
+      error: new Error('boom'),
+      exitCode: 1,
+      stderr: '',
+    } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
+  });
+
+  test('falls back to default when value is below minimum', async () => {
+    const spies = createLoggerSpies();
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'success',
+      data: MIN_POLL_INTERVAL_SEC - 1,
+    } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger(spies));
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
+    expect(spies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('outside')
+    );
+  });
+
+  test('falls back to default when value is above maximum', async () => {
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'success',
+      data: MAX_POLL_INTERVAL_SEC + 1,
+    } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
+  });
+
+  test('falls back to default when value is non-numeric', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: 'not-a-number' } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
   });
 });

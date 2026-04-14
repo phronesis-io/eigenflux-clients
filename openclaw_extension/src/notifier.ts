@@ -1,22 +1,26 @@
 import { randomUUID } from 'node:crypto';
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
 import { type NotificationRouteOverrides } from './config';
-import { OpenClawGatewayRpcClient } from './gateway-rpc-client';
 import { Logger } from './logger';
 import {
   resolveNotificationRoute,
   type NotificationRouteConfig,
+  type NotificationRouteSource,
   type ResolvedNotificationRoute,
+  type ResolvedNotificationRouteResult,
 } from './notification-route-resolver';
 import { writeStoredNotificationRoute } from './session-route-memory';
 
 const COMMAND_TIMEOUT_MS = 15000;
+// deliver: true runs the full agent loop (LLM + reply + channel send), which can
+// take well over a minute on long feed payloads. 3 minutes gives agents plenty
+// of room to complete while still bounding a genuinely stuck run.
+const SUBAGENT_WAIT_TIMEOUT_MS = 180_000;
 const HEARTBEAT_REASON = 'plugin:eigenflux';
 
 export type EigenFluxNotifierConfig = {
-  gatewayUrl: string;
-  gatewayToken?: string;
-  workdir?: string;
+  eigenfluxBin?: string;
+  serverName?: string;
   sessionKey: string;
   agentId: string;
   replyChannel?: string;
@@ -26,15 +30,6 @@ export type EigenFluxNotifierConfig = {
   sessionStorePath?: string;
   routeOverrides?: NotificationRouteOverrides;
 };
-
-type GatewayRpcClientLike = {
-  sendAgentMessage(message: string): Promise<{ sessionKey: string; runId: string }>;
-};
-
-type CreateGatewayRpcClient = (
-  config: EigenFluxNotifierConfig & ResolvedNotificationRoute,
-  logger: Logger
-) => GatewayRpcClientLike;
 
 type CommandRunner = (
   argv: string[],
@@ -59,71 +54,97 @@ export class EigenFluxNotifier {
   private readonly api: OpenClawPluginApi;
   private readonly logger: Logger;
   private readonly config: EigenFluxNotifierConfig;
-  private readonly createGatewayRpcClient: CreateGatewayRpcClient;
 
-  constructor(
-    api: OpenClawPluginApi,
-    logger: Logger,
-    config: EigenFluxNotifierConfig,
-    createGatewayRpcClient: CreateGatewayRpcClient = createDefaultGatewayRpcClient
-  ) {
+  constructor(api: OpenClawPluginApi, logger: Logger, config: EigenFluxNotifierConfig) {
     this.api = api;
     this.logger = logger;
     this.config = config;
-    this.createGatewayRpcClient = createGatewayRpcClient;
   }
 
   async deliver(message: string): Promise<boolean> {
-    const route = this.resolveRoute();
+    const initial = await this.resolveRoute();
     this.logger.info(
-      `Delivery route resolved: ${formatRouteForLog(route)}, message_preview=${previewMessage(message)}`
+      `Delivery route resolved: source=${initial.source}, ${formatRouteForLog(initial.route)}, message_preview=${previewMessage(message)}`
     );
+
+    const firstAttempt = await this.attemptDelivery(message, initial.route);
+    if (firstAttempt.result.ok) {
+      await this.rememberRouteIfChanged(firstAttempt.finalRoute, initial.source);
+      this.logDispatch(firstAttempt.result);
+      return true;
+    }
+
+    // If every transport failed with a remembered route, it may be stale.
+    // Re-resolve fresh (skipping remembered), then retry the transport chain once.
+    if (initial.source === 'remembered') {
+      this.logger.warn(
+        `All transports failed with remembered route; re-resolving without remembered config.`
+      );
+      const fallback = await this.resolveRoute({ ignoreRemembered: true });
+      if (
+        fallback.route.sessionKey !== initial.route.sessionKey ||
+        fallback.route.replyTo !== initial.route.replyTo ||
+        fallback.route.replyChannel !== initial.route.replyChannel
+      ) {
+        this.logger.info(
+          `Retrying delivery with fresh route: source=${fallback.source}, ${formatRouteForLog(fallback.route)}`
+        );
+        const retry = await this.attemptDelivery(message, fallback.route);
+        if (retry.result.ok) {
+          await this.rememberRouteIfChanged(retry.finalRoute, fallback.source);
+          this.logDispatch(retry.result);
+          return true;
+        }
+        this.logger.error(
+          `Failed to deliver notification after fresh re-resolve: ${retry.errors.join(' | ')}`
+        );
+        return false;
+      }
+      this.logger.warn('Fresh re-resolve produced the same route; skipping retry.');
+    }
+
+    this.logger.error(`Failed to deliver notification: ${firstAttempt.errors.join(' | ')}`);
+    return false;
+  }
+
+  private async attemptDelivery(
+    message: string,
+    route: ResolvedNotificationRoute
+  ): Promise<{
+    result: NotifyAttemptResult;
+    finalRoute: ResolvedNotificationRoute;
+    errors: string[];
+  }> {
     const attempts: Array<() => Promise<NotifyAttemptResult>> = [
       () => this.tryNotifyViaRuntimeSubagent(message, route),
-      () => this.tryNotifyViaGatewayRpcAgent(message, route),
       () => this.tryNotifyViaRuntimeCommandAgent(message, route),
       () => this.tryNotifyViaRuntimeHeartbeat(message, route),
       () => this.tryNotifyViaRuntimeCommandHeartbeat(message),
     ];
 
     const errors: string[] = [];
-
     for (const attempt of attempts) {
       const result = await attempt();
       if (result.ok) {
-        this.rememberRoute({
+        const finalRoute: ResolvedNotificationRoute = {
           sessionKey: result.sessionKey ?? route.sessionKey,
           agentId: route.agentId,
           replyChannel: route.replyChannel,
           replyTo: route.replyTo,
           replyAccountId: route.replyAccountId,
-        });
-        this.logDispatch(result);
-        return true;
+        };
+        return { result, finalRoute, errors };
       }
       this.logger.warn(
         `Notification attempt failed: mode=${result.mode}, ${formatRouteForLog(route)}, error=${result.error}`
       );
       errors.push(`${result.mode}: ${result.error}`);
     }
-
-    this.logger.error(`Failed to deliver notification: ${errors.join(' | ')}`);
-    return false;
-  }
-
-  async deliverWithSubagent(message: string): Promise<boolean> {
-    const route = this.resolveRoute();
-    this.logger.info(
-      `Subagent-only delivery route resolved: ${formatRouteForLog(route)}, message_preview=${previewMessage(message)}`
-    );
-    const result = await this.tryNotifyViaRuntimeSubagent(message, route);
-    if (!result.ok) {
-      this.logger.warn(`runtime.subagent test dispatch failed: ${result.error}`);
-      return false;
-    }
-    this.rememberRoute(route);
-    this.logDispatch(result);
-    return true;
+    return {
+      result: { ok: false, mode: 'all', error: errors.join(' | ') },
+      finalRoute: route,
+      errors,
+    };
   }
 
   private async tryNotifyViaRuntimeSubagent(
@@ -139,6 +160,10 @@ export class EigenFluxNotifier {
               deliver?: boolean;
               idempotencyKey?: string;
             }) => Promise<{ runId: string }>;
+            waitForRun?: (params: {
+              runId: string;
+              timeoutMs?: number;
+            }) => Promise<{ status: 'ok' | 'error' | 'timeout'; error?: string }>;
           };
         }
       | undefined)?.subagent;
@@ -155,53 +180,42 @@ export class EigenFluxNotifier {
       this.logger.info(
         `Attempting runtime.subagent delivery: ${formatRouteForLog(route)}, deliver=true`
       );
-      const result = await runtimeSubagent.run({
+      const { runId } = await runtimeSubagent.run({
         sessionKey: route.sessionKey,
         message,
         deliver: true,
         idempotencyKey: randomUUID(),
       });
+
+      // run() only enqueues; wait long enough for the full agent loop (LLM +
+      // reply + channel send) to complete so we can surface real errors. A
+      // waitForRun timeout here means "still running" — treat it as success
+      // and let the subagent finish asynchronously, since retrying via CLI
+      // would re-run the same agent loop and cause duplicate deliveries.
+      if (typeof runtimeSubagent.waitForRun === 'function') {
+        const waited = await runtimeSubagent.waitForRun({
+          runId,
+          timeoutMs: SUBAGENT_WAIT_TIMEOUT_MS,
+        });
+        if (waited.status === 'error') {
+          return {
+            ok: false,
+            mode: 'runtime.subagent',
+            error: `subagent run error${waited.error ? `: ${waited.error}` : ''}`,
+          };
+        }
+      }
+
       return {
         ok: true,
         mode: 'runtime.subagent',
         sessionKey: route.sessionKey,
-        runId: result.runId,
+        runId,
       };
     } catch (error) {
       return {
         ok: false,
         mode: 'runtime.subagent',
-        error: formatError(error),
-      };
-    }
-  }
-
-  private async tryNotifyViaGatewayRpcAgent(
-    message: string,
-    route: ResolvedNotificationRoute
-  ): Promise<NotifyAttemptResult> {
-    try {
-      this.logger.info(
-        `Attempting gateway.rpc.agent delivery: ${formatRouteForLog(route)}, gateway_url=${this.config.gatewayUrl}`
-      );
-      const client = this.createGatewayRpcClient(
-        {
-          ...this.config,
-          ...route,
-        },
-        this.logger
-      );
-      const result = await client.sendAgentMessage(message);
-      return {
-        ok: true,
-        mode: 'gateway.rpc.agent',
-        sessionKey: result.sessionKey,
-        runId: result.runId,
-      };
-    } catch (error) {
-      return {
-        ok: false,
-        mode: 'gateway.rpc.agent',
         error: formatError(error),
       };
     }
@@ -290,10 +304,11 @@ export class EigenFluxNotifier {
   }
 
   private async tryNotifyViaRuntimeCommandHeartbeat(message: string): Promise<NotifyAttemptResult> {
+    const { route } = await this.resolveRoute();
     return this.runRuntimeCommand(
       'runtime.command.heartbeat',
       this.buildHeartbeatCliArgs(message),
-      this.resolveRoute()
+      route
     );
   }
 
@@ -401,18 +416,42 @@ export class EigenFluxNotifier {
     };
   }
 
-  private resolveRoute(): ResolvedNotificationRoute {
-    return resolveNotificationRoute(this.config as NotificationRouteConfig, this.logger);
+  private async resolveRoute(
+    options: { ignoreRemembered?: boolean } = {}
+  ): Promise<ResolvedNotificationRouteResult> {
+    return resolveNotificationRoute(
+      this.config as NotificationRouteConfig,
+      this.logger,
+      options
+    );
   }
 
-  private rememberRoute(route: ResolvedNotificationRoute): void {
+  /**
+   * Persist the successful route to the eigenflux CLI config unless it came from
+   * the remembered config already (no-op when unchanged).
+   */
+  private async rememberRouteIfChanged(
+    route: ResolvedNotificationRoute,
+    source: NotificationRouteSource
+  ): Promise<void> {
     if (!route.sessionKey || !route.agentId) {
       return;
     }
     if (isInternalSessionKey(route.sessionKey)) {
       return;
     }
-    writeStoredNotificationRoute(this.config.workdir, route, this.logger);
+    if (source === 'remembered') {
+      this.logger.debug(
+        `Skipping remembered-route write; route came from config (session_key=${route.sessionKey})`
+      );
+      return;
+    }
+    await writeStoredNotificationRoute(
+      this.config.eigenfluxBin,
+      this.config.serverName,
+      route,
+      this.logger
+    );
   }
 
   private logDispatch(result: Extract<NotifyAttemptResult, { ok: true }>): void {
@@ -436,22 +475,6 @@ function isInternalSessionKey(sessionKey: string): boolean {
 
   const parts = trimmed.split(':').filter((part) => part.length > 0);
   return parts[0]?.toLowerCase() === 'agent' && parts[2]?.toLowerCase() === 'main';
-}
-
-function createDefaultGatewayRpcClient(
-  config: EigenFluxNotifierConfig & ResolvedNotificationRoute,
-  logger: Logger
-): OpenClawGatewayRpcClient {
-  return new OpenClawGatewayRpcClient({
-    gatewayUrl: config.gatewayUrl,
-    gatewayToken: config.gatewayToken,
-    sessionKey: config.sessionKey,
-    agentId: config.agentId,
-    replyChannel: config.replyChannel,
-    replyTo: config.replyTo,
-    replyAccountId: config.replyAccountId,
-    logger,
-  });
 }
 
 function formatCommandFailure(result: {

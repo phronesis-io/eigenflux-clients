@@ -13,15 +13,11 @@ import { Logger } from './logger';
 import { normalizeReplyTarget } from './reply-target';
 import { execEigenflux } from './cli-executor';
 
-const PLUGIN_VERSION = '0.0.5';
+const PLUGIN_VERSION = '0.0.6';
 const DEFAULT_EIGENFLUX_BIN = 'eigenflux';
-const DEFAULT_GATEWAY_URL = 'ws://127.0.0.1:18789';
 const DEFAULT_SESSION_KEY = 'main';
 const DEFAULT_AGENT_ID = 'main';
 const DEFAULT_OPENCLAW_CLI_BIN = 'openclaw';
-const DEFAULT_FEED_POLL_INTERVAL_SEC = 300;
-const MIN_POLL_INTERVAL_SEC = 10;
-const MAX_POLL_INTERVAL_SEC = 24 * 60 * 60;
 const HOST_KIND = 'openclaw';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -52,10 +48,7 @@ export type DiscoveredServer = {
 
 export type EigenFluxPluginConfig = {
   eigenfluxBin?: string;
-  feedPollInterval?: number;
   skills?: string[];
-  gatewayUrl?: string;
-  gatewayToken?: string;
   openclawCliBin?: string;
   serverRouting?: Record<string, {
     sessionKey?: string;
@@ -68,20 +61,9 @@ export type EigenFluxPluginConfig = {
 
 export type ResolvedEigenFluxPluginConfig = {
   eigenfluxBin: string;
-  feedPollIntervalSec: number;
   skills: string[];
-  gatewayUrl: string;
-  gatewayToken?: string;
   openclawCliBin: string;
   serverRouting: Record<string, RoutingConfig>;
-};
-
-type GlobalGatewayConfig = {
-  gateway?: {
-    auth?: {
-      token?: string;
-    };
-  };
 };
 
 type DerivedNotificationRoute = {
@@ -103,45 +85,6 @@ function readNonEmptyString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function parsePositiveInteger(value: unknown, fallback: number): number {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-    return Math.floor(value);
-  }
-  if (typeof value === 'string') {
-    const parsed = parseInt(value, 10);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return parsed;
-    }
-  }
-  return fallback;
-}
-
-function parsePollingIntervalSeconds(
-  value: unknown,
-  fallback: number,
-  options: {
-    fieldName: string;
-    logger?: Logger;
-  }
-): number {
-  const parsed = parsePositiveInteger(value, fallback);
-  if (parsed < MIN_POLL_INTERVAL_SEC) {
-    options.logger?.warn(
-      `${options.fieldName} is below ${MIN_POLL_INTERVAL_SEC}s; clamping to ${MIN_POLL_INTERVAL_SEC}s`
-    );
-    return MIN_POLL_INTERVAL_SEC;
-  }
-
-  if (parsed <= MAX_POLL_INTERVAL_SEC) {
-    return parsed;
-  }
-
-  options.logger?.warn(
-    `${options.fieldName} exceeds ${MAX_POLL_INTERVAL_SEC}s; clamping to ${MAX_POLL_INTERVAL_SEC}s`
-  );
-  return MAX_POLL_INTERVAL_SEC;
 }
 
 function isSessionPeerShape(value: string | undefined): boolean {
@@ -215,31 +158,39 @@ function createRouteOverrides(
 
 // ─── Server Discovery ───────────────────────────────────────────────────────
 
+export type DiscoveryResult =
+  | { kind: 'ok'; servers: DiscoveredServer[] }
+  | { kind: 'not_installed'; bin: string };
+
 export async function discoverServers(
   eigenfluxBin: string,
   logger?: Logger
-): Promise<DiscoveredServer[]> {
+): Promise<DiscoveryResult> {
   const result = await execEigenflux<DiscoveredServer[]>(
     eigenfluxBin,
-    ['config', 'server', 'list', '-f', 'json'],
+    ['server', 'list', '--format', 'json'],
     { logger }
   );
 
   if (result.kind === 'success') {
     if (Array.isArray(result.data)) {
-      return result.data;
+      return { kind: 'ok', servers: result.data };
     }
-    logger?.warn('eigenflux config server list returned non-array data');
-    return [];
+    logger?.warn('eigenflux server list returned non-array data');
+    return { kind: 'ok', servers: [] };
+  }
+
+  if (result.kind === 'not_installed') {
+    return { kind: 'not_installed', bin: result.bin };
   }
 
   if (result.kind === 'auth_required') {
-    logger?.warn('eigenflux config server list: auth required (unexpected)');
-    return [];
+    logger?.warn('eigenflux server list: auth required (unexpected)');
+    return { kind: 'ok', servers: [] };
   }
 
-  logger?.error(`eigenflux config server list failed: ${result.error.message}`);
-  return [];
+  logger?.error(`eigenflux server list failed: ${result.error.message}`);
+  return { kind: 'ok', servers: [] };
 }
 
 // ─── EigenFlux Home ─────────────────────────────────────────────────────────
@@ -285,7 +236,6 @@ function resolveRoutingConfig(
 
 export function resolvePluginConfig(
   pluginConfig: unknown,
-  globalConfig?: GlobalGatewayConfig,
   logger?: Logger
 ): ResolvedEigenFluxPluginConfig {
   const normalized = isRecord(pluginConfig) ? pluginConfig : {};
@@ -305,16 +255,7 @@ export function resolvePluginConfig(
 
   return {
     eigenfluxBin: readNonEmptyString(normalized.eigenfluxBin) ?? DEFAULT_EIGENFLUX_BIN,
-    feedPollIntervalSec: parsePollingIntervalSeconds(
-      normalized.feedPollInterval,
-      DEFAULT_FEED_POLL_INTERVAL_SEC,
-      { fieldName: 'feedPollInterval', logger }
-    ),
     skills: rawSkills,
-    gatewayUrl: readNonEmptyString(normalized.gatewayUrl) ?? DEFAULT_GATEWAY_URL,
-    gatewayToken:
-      readNonEmptyString(normalized.gatewayToken) ??
-      readNonEmptyString(globalConfig?.gateway?.auth?.token),
     openclawCliBin:
       readNonEmptyString(normalized.openclawCliBin) ?? DEFAULT_OPENCLAW_CLI_BIN,
     serverRouting,
@@ -335,13 +276,9 @@ export function expandHomeDir(input: string): string {
 
 export const PLUGIN_CONFIG = {
   DEFAULT_EIGENFLUX_BIN,
-  DEFAULT_GATEWAY_URL,
   DEFAULT_SESSION_KEY,
   DEFAULT_AGENT_ID,
   DEFAULT_OPENCLAW_CLI_BIN,
-  DEFAULT_FEED_POLL_INTERVAL_SEC,
-  MIN_POLL_INTERVAL_SEC,
-  MAX_POLL_INTERVAL_SEC,
   HOST_KIND,
   PLUGIN_VERSION,
 } as const;
@@ -355,46 +292,10 @@ export const PLUGIN_CONFIG_SCHEMA = {
       description: 'Path to the eigenflux CLI binary',
       default: DEFAULT_EIGENFLUX_BIN,
     },
-    feedPollInterval: {
-      type: 'integer',
-      minimum: MIN_POLL_INTERVAL_SEC,
-      maximum: MAX_POLL_INTERVAL_SEC,
-      description: 'Feed polling interval in seconds',
-      default: DEFAULT_FEED_POLL_INTERVAL_SEC,
-    },
-    skills: {
-      type: 'array',
-      items: { type: 'string' },
-      description: 'EigenFlux skill names bundled with the plugin',
-      default: ['ef-broadcast', 'ef-communication'],
-    },
-    gatewayUrl: {
-      type: 'string',
-      description: 'OpenClaw Gateway WebSocket URL used for Gateway RPC fallback',
-      default: DEFAULT_GATEWAY_URL,
-    },
-    gatewayToken: {
-      type: 'string',
-      description: 'Optional gateway token override used for Gateway RPC fallback',
-    },
     openclawCliBin: {
       type: 'string',
       description: 'OpenClaw CLI binary used by runtime command fallbacks',
       default: DEFAULT_OPENCLAW_CLI_BIN,
-    },
-    serverRouting: {
-      type: 'object',
-      description: 'Per-server notification routing overrides keyed by server name',
-      additionalProperties: {
-        type: 'object',
-        properties: {
-          sessionKey: { type: 'string' },
-          agentId: { type: 'string' },
-          replyChannel: { type: 'string' },
-          replyTo: { type: 'string' },
-          replyAccountId: { type: 'string' },
-        },
-      },
     },
   },
 } as const;

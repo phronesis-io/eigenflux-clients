@@ -11,12 +11,19 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 export type CliResult<T> =
   | { kind: 'success'; data: T }
   | { kind: 'auth_required'; stderr: string }
+  | { kind: 'not_installed'; bin: string }
   | { kind: 'error'; error: Error; exitCode: number | null; stderr: string };
 
 export interface ExecOptions {
   timeout?: number;
   cwd?: string;
   logger?: Logger;
+  /**
+   * When false, stdout is returned as a raw string instead of being parsed as
+   * JSON. Useful for CLI commands whose stdout is a human-readable status line
+   * (e.g. `eigenflux config set`). Defaults to true.
+   */
+  parseJson?: boolean;
 }
 
 export function execEigenflux<T>(
@@ -42,6 +49,11 @@ export function execEigenflux<T>(
       (error, stdout, stderr) => {
         if (error) {
           const exitCode = (error as NodeJS.ErrnoException & { code?: number | string }).code;
+          if (exitCode === 'ENOENT') {
+            logger?.warn(`execEigenflux: binary not found: ${bin}`);
+            resolve({ kind: 'not_installed', bin });
+            return;
+          }
           const numericExit =
             typeof exitCode === 'number'
               ? exitCode
@@ -71,6 +83,11 @@ export function execEigenflux<T>(
             kind: 'success',
             data: undefined as unknown as T,
           });
+          return;
+        }
+
+        if (options?.parseJson === false) {
+          resolve({ kind: 'success', data: trimmed as unknown as T });
           return;
         }
 

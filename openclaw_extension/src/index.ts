@@ -1,8 +1,8 @@
-import * as path from 'path';
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
 
 import {
   EigenFluxPollingClient,
+  readPollIntervalSec,
   type AuthRequiredEvent,
   type FeedResponse,
 } from './polling-client';
@@ -20,10 +20,11 @@ import {
   type RoutingConfig,
   type DiscoveredServer,
 } from './config';
-import { resolveNotificationRoute } from './notification-route-resolver';
+import { findSessionRouteForBinding } from './notification-route-resolver';
 import {
   buildAuthRequiredPromptTemplate,
   buildFeedPayloadPromptTemplate,
+  buildNotInstalledPromptTemplate,
   buildPmStreamEventPromptTemplate,
   type EigenFluxPromptServerContext,
 } from './agent-prompt-templates';
@@ -94,13 +95,13 @@ const DEFAULT_ROUTING: RoutingConfig = {
 };
 
 function register(api: OpenClawPluginApi): void {
-  const logger = new Logger(api.logger);
-  logger.info('EigenFlux activating...');
+  const logger = new Logger(resolvePluginLogger(api));
 
-  const pluginConfig = resolvePluginConfig(api.pluginConfig, api.config as any, logger);
+  const pluginConfig = resolvePluginConfig(api.pluginConfig, logger);
   const eigenfluxHome = resolveEigenfluxHome();
 
   let runtimes: ServerRuntime[] = [];
+  let notInstalledPromptDelivered = false;
 
   // Register a single meta-service that discovers servers on start
   api.registerService({
@@ -108,7 +109,19 @@ function register(api: OpenClawPluginApi): void {
     start: async () => {
       logger.info('Starting EigenFlux discovery service...');
 
-      const servers = await discoverServers(pluginConfig.eigenfluxBin, logger);
+      const discovery = await discoverServers(pluginConfig.eigenfluxBin, logger);
+      if (discovery.kind === 'not_installed') {
+        logger.warn(
+          `EigenFlux CLI not installed (bin=${discovery.bin}); delivering install prompt to user`
+        );
+        if (!notInstalledPromptDelivered) {
+          notInstalledPromptDelivered = true;
+          await deliverNotInstalledPrompt(api, logger, pluginConfig, eigenfluxHome, discovery.bin);
+        }
+        return;
+      }
+
+      const servers = discovery.servers;
       if (servers.length === 0) {
         logger.warn('No EigenFlux servers discovered; services will not start');
         return;
@@ -134,12 +147,33 @@ function register(api: OpenClawPluginApi): void {
         await runtime.streamClient.stop();
       }
       runtimes = [];
+      notInstalledPromptDelivered = false;
     },
   });
 
   registerCommand(api, logger, pluginConfig, eigenfluxHome, () => runtimes);
+}
 
-  logger.info('EigenFlux activated (servers will be discovered on service start)');
+function resolvePluginLogger(api: OpenClawPluginApi): unknown {
+  const runtimeLogging = (api.runtime as
+    | {
+        logging?: {
+          getChildLogger?: (bindings: Record<string, unknown>) => unknown;
+        };
+      }
+    | undefined)?.logging;
+
+  if (runtimeLogging && typeof runtimeLogging.getChildLogger === 'function') {
+    try {
+      const child = runtimeLogging.getChildLogger({ plugin: 'eigenflux' });
+      if (child) {
+        return child;
+      }
+    } catch {
+      // fall through to api.logger
+    }
+  }
+  return api.logger;
 }
 
 const plugin = {
@@ -152,6 +186,32 @@ const plugin = {
 
 export default plugin;
 
+const INSTALL_COMMAND = 'curl -fsSL https://eigenflux.ai/install.sh | bash';
+
+async function deliverNotInstalledPrompt(
+  api: OpenClawPluginApi,
+  logger: Logger,
+  pluginConfig: ResolvedEigenFluxPluginConfig,
+  _eigenfluxHome: string,
+  bin: string
+): Promise<void> {
+  // Intentionally no workdir: the bootstrap notifier must not read or persist
+  // any remembered session route under <eigenfluxHome>/bootstrap.
+  const notifier = new EigenFluxNotifier(api, logger, {
+    sessionKey: DEFAULT_ROUTING.sessionKey,
+    agentId: DEFAULT_ROUTING.agentId,
+    replyChannel: DEFAULT_ROUTING.replyChannel,
+    replyTo: DEFAULT_ROUTING.replyTo,
+    replyAccountId: DEFAULT_ROUTING.replyAccountId,
+    openclawCliBin: pluginConfig.openclawCliBin,
+    routeOverrides: DEFAULT_ROUTING.routeOverrides,
+  });
+
+  await notifier.deliver(
+    buildNotInstalledPromptTemplate({ bin, installCommand: INSTALL_COMMAND })
+  );
+}
+
 function createServerRuntime(
   api: OpenClawPluginApi,
   logger: Logger,
@@ -160,14 +220,12 @@ function createServerRuntime(
   eigenfluxHome: string
 ): ServerRuntime {
   const routing = pluginConfig.serverRouting[server.name] ?? DEFAULT_ROUTING;
-  const serverDataDir = path.join(eigenfluxHome, 'servers', server.name);
 
   const credentialsLoader = new CredentialsLoader(logger, eigenfluxHome, server.name);
 
   const notifier = new EigenFluxNotifier(api, logger, {
-    gatewayUrl: pluginConfig.gatewayUrl,
-    gatewayToken: pluginConfig.gatewayToken,
-    workdir: serverDataDir,
+    eigenfluxBin: pluginConfig.eigenfluxBin,
+    serverName: server.name,
     sessionKey: routing.sessionKey,
     agentId: routing.agentId,
     replyChannel: routing.replyChannel,
@@ -179,9 +237,7 @@ function createServerRuntime(
 
   const getPromptContext = (): EigenFluxPromptServerContext => ({
     serverName: server.name,
-    endpoint: server.endpoint,
     eigenfluxHome,
-    skills: pluginConfig.skills,
   });
 
   let lastAuthPromptKey: string | null = null;
@@ -206,7 +262,8 @@ function createServerRuntime(
   const feedPoller = new EigenFluxPollingClient({
     serverName: server.name,
     eigenfluxBin: pluginConfig.eigenfluxBin,
-    pollIntervalSec: pluginConfig.feedPollIntervalSec,
+    resolvePollIntervalSec: () =>
+      readPollIntervalSec(pluginConfig.eigenfluxBin, server.name, logger),
     logger,
     onFeedPolled: async (payload: FeedResponse) => {
       resetAuthPromptGate();
@@ -274,9 +331,8 @@ function registerCommand(
         };
       }
       const runtime = selection.runtime;
-      const serverDataDir = path.join(eigenfluxHome, 'servers', runtime.server.name);
 
-      await rememberCurrentCommandRouteIfPossible(ctx, runtime, serverDataDir, logger);
+      await rememberCurrentCommandRouteIfPossible(ctx, runtime, pluginConfig.eigenfluxBin, logger);
 
       switch (parsed.command) {
         case 'auth':
@@ -297,7 +353,7 @@ function registerCommand(
           };
         case 'here':
           return {
-            text: await buildHereText(ctx, runtime, serverDataDir, logger),
+            text: await buildHereText(ctx, runtime, pluginConfig.eigenfluxBin, logger),
           };
         default:
           return {
@@ -429,28 +485,24 @@ function isInternalAgentSessionKey(value: string | undefined): boolean {
 async function resolveCurrentCommandRoute(
   ctx: CommandRouteContext,
   runtime: ServerRuntime,
-  serverDataDir: string,
   logger: Logger
 ) {
-  const channel = normalizeChannel(ctx.channel);
-  const accountId = readNonEmptyString(ctx.accountId);
-
-  let replyChannel = channel;
-  let replyTo =
+  let channel = normalizeChannel(ctx.channel);
+  let to =
     normalizeReplyTarget(ctx.to, { channel }) ??
     normalizeReplyTarget(ctx.from, { channel, fallbackKind: 'user' });
-  let replyAccountId = accountId;
+  let accountId = readNonEmptyString(ctx.accountId);
 
   if (typeof ctx.getCurrentConversationBinding === 'function') {
     try {
       const binding = await ctx.getCurrentConversationBinding();
       if (binding) {
-        replyChannel = normalizeChannel(binding.channel) ?? replyChannel;
-        replyTo =
-          normalizeReplyTarget(binding.conversationId, { channel: replyChannel }) ??
-          normalizeReplyTarget(binding.parentConversationId, { channel: replyChannel }) ??
-          replyTo;
-        replyAccountId = readNonEmptyString(binding.accountId) ?? replyAccountId;
+        channel = normalizeChannel(binding.channel) ?? channel;
+        to =
+          normalizeReplyTarget(binding.conversationId, { channel }) ??
+          normalizeReplyTarget(binding.parentConversationId, { channel }) ??
+          to;
+        accountId = readNonEmptyString(binding.accountId) ?? accountId;
       }
     } catch (error) {
       logger.debug(
@@ -459,56 +511,28 @@ async function resolveCurrentCommandRoute(
     }
   }
 
-  if (!replyChannel || !replyTo) {
+  if (!channel || !to) {
     return undefined;
   }
 
-  const route = resolveNotificationRoute(
+  return findSessionRouteForBinding(
     {
-      sessionKey: 'main',
       agentId: runtime.routing.agentId,
-      replyChannel,
-      replyTo,
-      replyAccountId,
-      workdir: serverDataDir,
-      routeOverrides: {
-        sessionKey: false,
-        agentId: false,
-        replyChannel: true,
-        replyTo: true,
-        replyAccountId: replyAccountId !== undefined,
-      },
+      channel,
+      to,
+      accountId,
     },
     logger
   );
-
-  if (!route.replyChannel || !route.replyTo) {
-    return undefined;
-  }
-
-  if (isInternalAgentSessionKey(route.sessionKey)) {
-    const configuredSessionKey = readNonEmptyString(runtime.routing.sessionKey);
-    if (configuredSessionKey && !isInternalAgentSessionKey(configuredSessionKey)) {
-      return {
-        sessionKey: configuredSessionKey,
-        agentId: readNonEmptyString(runtime.routing.agentId) ?? route.agentId,
-        replyChannel: route.replyChannel,
-        replyTo: route.replyTo,
-        replyAccountId: route.replyAccountId,
-      };
-    }
-  }
-
-  return route;
 }
 
 async function buildHereText(
   ctx: CommandRouteContext,
   runtime: ServerRuntime,
-  serverDataDir: string,
+  eigenfluxBin: string,
   logger: Logger
 ): Promise<string> {
-  const route = await resolveCurrentCommandRoute(ctx, runtime, serverDataDir, logger);
+  const route = await resolveCurrentCommandRoute(ctx, runtime, logger);
   if (!route || route.sessionKey === 'main' || route.sessionKey.endsWith(':main')) {
     return [
       `Unable to resolve the current external session for server=${runtime.server.name}.`,
@@ -516,7 +540,7 @@ async function buildHereText(
     ].join('\n');
   }
 
-  const saved = writeStoredNotificationRoute(serverDataDir, route, logger);
+  const saved = await writeStoredNotificationRoute(eigenfluxBin, runtime.server.name, route, logger);
   if (!saved) {
     return `Failed to persist the current EigenFlux route for server=${runtime.server.name}; check plugin logs for details.`;
   }
@@ -536,15 +560,15 @@ async function buildHereText(
 async function rememberCurrentCommandRouteIfPossible(
   ctx: CommandRouteContext,
   runtime: ServerRuntime,
-  serverDataDir: string,
+  eigenfluxBin: string,
   logger: Logger
 ): Promise<void> {
-  const route = await resolveCurrentCommandRoute(ctx, runtime, serverDataDir, logger);
+  const route = await resolveCurrentCommandRoute(ctx, runtime, logger);
   if (!route || route.sessionKey === 'main' || route.sessionKey.endsWith(':main')) {
     return;
   }
 
-  if (writeStoredNotificationRoute(serverDataDir, route, logger)) {
+  if (await writeStoredNotificationRoute(eigenfluxBin, runtime.server.name, route, logger)) {
     logger.debug(
       `Remembered current command route for server=${runtime.server.name}: session_key=${route.sessionKey}, channel=${route.replyChannel ?? 'unknown'}, to=${route.replyTo ?? 'unknown'}`
     );
@@ -580,6 +604,9 @@ async function buildProfileText(
 
   if (result.kind === 'auth_required') {
     return buildAuthRequiredPromptTemplate({ context: runtime.getPromptContext() });
+  }
+  if (result.kind === 'not_installed') {
+    return `EigenFlux CLI not installed (bin=${result.bin}). Install with: ${INSTALL_COMMAND}`;
   }
   if (result.kind === 'error') {
     return `Failed to fetch profile for server ${runtime.server.name}: ${result.error.message}`;

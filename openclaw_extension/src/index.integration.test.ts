@@ -1,8 +1,6 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import http from 'http';
-import { WebSocketServer } from 'ws';
 
 // Shared variable so the os mock factory always returns the test-controlled homeDir
 let __testHomeDir: string | undefined;
@@ -70,10 +68,6 @@ describe('register integration', () => {
   let homeDir: string;
   let eigenfluxHome: string;
 
-  let gatewayHttpServer: http.Server;
-  let gatewayWss: WebSocketServer;
-  let gatewayPort: number;
-
   let feedItems: Array<{
     item_id: string;
     group_id?: string;
@@ -117,237 +111,20 @@ describe('register integration', () => {
           },
         };
       }
+      if (args[0] === 'config' && args[1] === 'get') {
+        return { kind: 'success', data: undefined };
+      }
       return { kind: 'error', error: new Error('unknown command'), exitCode: 1, stderr: '' };
     });
 
-    discoverServersMock.mockResolvedValue([
+    discoverServersMock.mockResolvedValue({ kind: 'ok', servers: [
       { name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true },
-    ]);
-
-    gatewayHttpServer = http.createServer();
-    gatewayWss = new WebSocketServer({ server: gatewayHttpServer });
-    await new Promise<void>((resolve) => {
-      gatewayHttpServer.listen(0, '127.0.0.1', () => {
-        gatewayPort = (gatewayHttpServer.address() as any).port;
-        resolve();
-      });
-    });
+    ] });
   });
 
   afterEach(async () => {
     __testHomeDir = undefined;
     fs.rmSync(homeDir, { recursive: true, force: true });
-    await new Promise<void>((resolve) => gatewayWss.close(() => resolve()));
-    await new Promise<void>((resolve) => gatewayHttpServer.close(() => resolve()));
-  });
-
-  test('falls back to gateway rpc agent when polling feed returns new items', async () => {
-    jest.resetModules();
-    const { default: plugin } = await import('./index');
-    const services: any[] = [];
-    const gatewayMethods: string[] = [];
-    const agentParams: any[] = [];
-
-    gatewayWss.on('connection', (socket) => {
-      socket.send(
-        JSON.stringify({
-          type: 'event',
-          event: 'connect.challenge',
-          payload: { nonce: 'nonce-integration' },
-        })
-      );
-
-      socket.on('message', (raw) => {
-        const frame = JSON.parse(raw.toString());
-        gatewayMethods.push(String(frame.method || ''));
-
-        if (frame.type !== 'req') {
-          return;
-        }
-
-        if (frame.method === 'connect') {
-          socket.send(
-            JSON.stringify({
-              type: 'res',
-              id: frame.id,
-              ok: true,
-              payload: {
-                type: 'hello-ok',
-                protocol: 3,
-                server: { version: 'test', connId: 'conn-test' },
-                features: { methods: ['agent'], events: [] },
-                snapshot: { ts: Date.now() },
-                policy: { maxPayload: 1000000, maxBufferedBytes: 1000000, tickIntervalMs: 30000 },
-              },
-            })
-          );
-          return;
-        }
-
-        if (frame.method === 'agent') {
-          agentParams.push(frame.params);
-          socket.send(
-            JSON.stringify({
-              type: 'res',
-              id: frame.id,
-              ok: true,
-              payload: {
-                runId: 'run-integration-1',
-                status: 'started',
-              },
-            })
-          );
-        }
-      });
-    });
-
-    plugin.register({
-      config: {
-        gateway: {
-          auth: {
-            token: 'gw_test_token',
-          },
-        },
-      },
-      pluginConfig: {
-        gatewayUrl: `ws://127.0.0.1:${gatewayPort}`,
-        feedPollInterval: 60,
-      },
-      runtime: {},
-      logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
-      registerService: (service: any) => {
-        services.push(service);
-      },
-    } as any);
-
-    expect(services).toHaveLength(1);
-    await services[0].start();
-    await waitFor(() => agentParams.length === 1);
-
-    expect(execEigenfluxMock).toHaveBeenCalled();
-    expect(gatewayMethods).toEqual(['connect', 'agent']);
-    expect(agentParams[0]).toEqual(
-      expect.objectContaining({
-        agentId: 'main',
-        sessionKey: 'main',
-        message: expect.stringContaining('[EIGENFLUX_FEED_PAYLOAD]'),
-        deliver: true,
-      })
-    );
-    expect(String(agentParams[0].message)).toContain('"item_id": "501"');
-    expect(String(agentParams[0].message)).toContain('"group_id": "group-int-1"');
-    expect(String(agentParams[0].message)).toContain('network=eigenflux');
-    expect(String(agentParams[0].message)).toContain(`workdir=${eigenfluxHome}`);
-    expect(String(agentParams[0].message)).toContain(
-      'ef-broadcast skill to process feed payload'
-    );
-    expect(typeof agentParams[0].idempotencyKey).toBe('string');
-    expect(agentParams[0].idempotencyKey.length).toBeGreaterThan(0);
-
-    await services[0].stop();
-  });
-
-  test('dispatches the entire feed payload in a single gateway agent message', async () => {
-    feedItems = [
-      {
-        item_id: '601',
-        group_id: 'group-dup-1',
-        broadcast_type: 'info',
-        updated_at: 1760000000100,
-      },
-      {
-        item_id: '602',
-        group_id: 'group-dup-1',
-        broadcast_type: 'info',
-        updated_at: 1760000000200,
-      },
-    ];
-
-    jest.resetModules();
-    const { default: plugin } = await import('./index');
-    const services: any[] = [];
-    const agentParams: any[] = [];
-
-    gatewayWss.on('connection', (socket) => {
-      socket.send(
-        JSON.stringify({
-          type: 'event',
-          event: 'connect.challenge',
-          payload: { nonce: 'nonce-duplicate-group' },
-        })
-      );
-
-      socket.on('message', (raw) => {
-        const frame = JSON.parse(raw.toString());
-        if (frame.type !== 'req') {
-          return;
-        }
-
-        if (frame.method === 'connect') {
-          socket.send(
-            JSON.stringify({
-              type: 'res',
-              id: frame.id,
-              ok: true,
-              payload: {
-                type: 'hello-ok',
-                protocol: 3,
-                server: { version: 'test', connId: 'conn-dup' },
-                features: { methods: ['agent'], events: [] },
-                snapshot: { ts: Date.now() },
-                policy: { maxPayload: 1000000, maxBufferedBytes: 1000000, tickIntervalMs: 30000 },
-              },
-            })
-          );
-          return;
-        }
-
-        if (frame.method === 'agent') {
-          agentParams.push(frame.params);
-          socket.send(
-            JSON.stringify({
-              type: 'res',
-              id: frame.id,
-              ok: true,
-              payload: {
-                runId: `run-dup-${agentParams.length}`,
-                status: 'started',
-              },
-            })
-          );
-        }
-      });
-    });
-
-    plugin.register({
-      config: {
-        gateway: {
-          auth: {
-            token: 'gw_test_token',
-          },
-        },
-      },
-      pluginConfig: {
-        gatewayUrl: `ws://127.0.0.1:${gatewayPort}`,
-        feedPollInterval: 60,
-      },
-      runtime: {},
-      logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
-      registerService: (service: any) => {
-        services.push(service);
-      },
-    } as any);
-
-    expect(services).toHaveLength(1);
-    await services[0].start();
-    await waitFor(() => agentParams.length === 1);
-
-    expect(agentParams).toHaveLength(1);
-    expect(String(agentParams[0].message)).toContain('"item_id": "601"');
-    expect(String(agentParams[0].message)).toContain('"item_id": "602"');
-    expect(String(agentParams[0].message)).toContain('"group_id": "group-dup-1"');
-
-    await services[0].stop();
   });
 
   test('routes feed notifications via runtime.subagent when available', async () => {
@@ -358,9 +135,7 @@ describe('register integration', () => {
 
     plugin.register({
       config: {},
-      pluginConfig: {
-        feedPollInterval: 60,
-      },
+      pluginConfig: {},
       runtime: {
         subagent: {
           run: subagentRun,
@@ -382,7 +157,58 @@ describe('register integration', () => {
       deliver: true,
       idempotencyKey: expect.any(String),
     });
-    expect(String(subagentRun.mock.calls[0]?.[0]?.message)).toContain('"item_id": "501"');
+    const message = String(subagentRun.mock.calls[0]?.[0]?.message);
+    expect(message).toContain('"item_id": "501"');
+    expect(message).toContain('"group_id": "group-int-1"');
+    expect(message).toContain('server=eigenflux');
+    expect(message).toContain(`homedir=${eigenfluxHome}`);
+    expect(message).toContain('ef-broadcast skill to process feed payload');
+
+    await services[0].stop();
+  });
+
+  test('dispatches the entire feed payload in a single runtime.subagent message', async () => {
+    feedItems = [
+      {
+        item_id: '601',
+        group_id: 'group-dup-1',
+        broadcast_type: 'info',
+        updated_at: 1760000000100,
+      },
+      {
+        item_id: '602',
+        group_id: 'group-dup-1',
+        broadcast_type: 'info',
+        updated_at: 1760000000200,
+      },
+    ];
+
+    jest.resetModules();
+    const { default: plugin } = await import('./index');
+    const services: any[] = [];
+    const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-dup-1' });
+
+    plugin.register({
+      config: {},
+      pluginConfig: {},
+      runtime: {
+        subagent: { run: subagentRun },
+      },
+      logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+      registerService: (service: any) => {
+        services.push(service);
+      },
+    } as any);
+
+    expect(services).toHaveLength(1);
+    await services[0].start();
+    await waitFor(() => subagentRun.mock.calls.length === 1);
+
+    expect(subagentRun).toHaveBeenCalledTimes(1);
+    const message = String(subagentRun.mock.calls[0]?.[0]?.message);
+    expect(message).toContain('"item_id": "601"');
+    expect(message).toContain('"item_id": "602"');
+    expect(message).toContain('"group_id": "group-dup-1"');
 
     await services[0].stop();
   });
