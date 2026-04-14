@@ -1,7 +1,7 @@
 import {
   buildAuthRequiredPromptTemplate,
   buildFeedPayloadPromptTemplate,
-  buildPmPayloadPromptTemplate,
+  buildPmStreamEventPromptTemplate,
   type EigenFluxPromptServerContext,
 } from './agent-prompt-templates';
 
@@ -9,28 +9,32 @@ describe('agent prompt templates', () => {
   const context: EigenFluxPromptServerContext = {
     serverName: 'alpha',
     endpoint: 'https://alpha.example.com',
-    workdir: '/tmp/alpha',
-    skillPath: 'https://alpha.example.com/skill.md',
+    eigenfluxHome: '/tmp/.eigenflux',
+    skills: ['ef-broadcast', 'ef-communication'],
   };
 
-  test('injects endpoint auth reference into auth-required prompt', () => {
-    const prompt = buildAuthRequiredPromptTemplate({
-      ...context,
-      authEvent: {
-        reason: 'missing_token',
-        credentialsPath: '/tmp/alpha/credentials.json',
-      },
-    });
+  test('builds auth-required prompt with server context and CLI instruction', () => {
+    const prompt = buildAuthRequiredPromptTemplate({ context });
 
-    expect(prompt).toContain(
-      'Read https://alpha.example.com/references/auth.md and follow the skill to complete the login flow.'
-    );
-    expect(prompt).toContain(
-      'For first time login, Read https://alpha.example.com/references/onboarding.md and follow the skill to complete the onboarding flow.'
-    );
+    expect(prompt).toContain('[EIGENFLUX_AUTH_REQUIRED]');
+    expect(prompt).toContain('network=alpha');
+    expect(prompt).toContain('workdir=/tmp/.eigenflux');
+    expect(prompt).toContain('skill=ef-broadcast,ef-communication');
+    expect(prompt).toContain('EigenFlux authentication is required.');
+    expect(prompt).toContain('eigenflux auth login --email <email> -s alpha');
+    expect(prompt).toContain('ef-profile skill to complete the onboarding flow');
   });
 
-  test('injects endpoint feed reference into feed payload prompt', () => {
+  test('includes stderr detail in auth-required prompt when provided', () => {
+    const prompt = buildAuthRequiredPromptTemplate({
+      context,
+      stderr: 'token expired at 2026-01-01',
+    });
+
+    expect(prompt).toContain('detail=token expired at 2026-01-01');
+  });
+
+  test('builds feed payload prompt with server context and skill reference', () => {
     const prompt = buildFeedPayloadPromptTemplate(
       {
         code: 0,
@@ -44,16 +48,17 @@ describe('agent prompt templates', () => {
       context
     );
 
-    expect(prompt).toContain(
-      'Read https://alpha.example.com/references/feed.md and follow the skill to process feed payload.'
-    );
+    expect(prompt).toContain('[EIGENFLUX_FEED_PAYLOAD]');
+    expect(prompt).toContain('network=alpha');
+    expect(prompt).toContain('workdir=/tmp/.eigenflux');
+    expect(prompt).toContain('skill=ef-broadcast,ef-communication');
+    expect(prompt).toContain('ef-broadcast skill to process feed payload');
   });
 
-  test('injects endpoint message reference into pm payload prompt', () => {
-    const prompt = buildPmPayloadPromptTemplate(
+  test('builds pm stream event prompt with server context and skill reference', () => {
+    const prompt = buildPmStreamEventPromptTemplate(
       {
-        code: 0,
-        msg: 'ok',
+        type: 'pm',
         data: {
           messages: [],
         },
@@ -61,8 +66,10 @@ describe('agent prompt templates', () => {
       context
     );
 
-    expect(prompt).toContain(
-      'Read https://alpha.example.com/references/message.md and follow the skill to process private messages.'
-    );
+    expect(prompt).toContain('[EIGENFLUX_PM_PAYLOAD]');
+    expect(prompt).toContain('network=alpha');
+    expect(prompt).toContain('workdir=/tmp/.eigenflux');
+    expect(prompt).toContain('skill=ef-broadcast,ef-communication');
+    expect(prompt).toContain('ef-communication skill to process private messages');
   });
 });

@@ -4,22 +4,50 @@ import * as path from 'path';
 import http from 'http';
 import { WebSocketServer } from 'ws';
 
+// Shared variable so the os mock factory always returns the test-controlled homeDir
+let __testHomeDir: string | undefined;
+
 jest.mock('os', () => {
   const actual = jest.requireActual('os') as typeof import('os');
   return {
     ...actual,
-    homedir: jest.fn(() => actual.homedir()),
+    homedir: jest.fn(() => __testHomeDir ?? actual.homedir()),
   };
 });
 
-const packageManifest = require('../package.json') as { version: string };
+// Mock discoverServers and resolveEigenfluxHome
+const discoverServersMock = jest.fn();
+const resolveEigenfluxHomeMock = jest.fn();
 
-function readHeaderValue(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) {
-    return value[0];
-  }
-  return value;
-}
+jest.mock('./config', () => {
+  const actual = jest.requireActual('./config');
+  return {
+    ...actual,
+    discoverServers: (...args: any[]) => discoverServersMock(...args),
+    resolveEigenfluxHome: () => resolveEigenfluxHomeMock(),
+  };
+});
+
+// Mock execEigenflux for CLI calls
+const execEigenfluxMock = jest.fn();
+jest.mock('./cli-executor', () => ({
+  execEigenflux: (...args: any[]) => execEigenfluxMock(...args),
+}));
+
+// Mock EigenFluxStreamClient
+const streamClientStartMock = jest.fn().mockResolvedValue(undefined);
+const streamClientStopMock = jest.fn().mockResolvedValue(undefined);
+const streamClientIsRunningMock = jest.fn().mockReturnValue(false);
+const streamClientGetLastCursorMock = jest.fn().mockReturnValue(null);
+
+jest.mock('./stream-client', () => ({
+  EigenFluxStreamClient: jest.fn().mockImplementation(() => ({
+    start: streamClientStartMock,
+    stop: streamClientStopMock,
+    isRunning: streamClientIsRunningMock,
+    getLastCursor: streamClientGetLastCursorMock,
+  })),
+}));
 
 function waitFor(condition: () => boolean, timeoutMs = 8000): Promise<void> {
   const startedAt = Date.now();
@@ -40,42 +68,35 @@ function waitFor(condition: () => boolean, timeoutMs = 8000): Promise<void> {
 
 describe('register integration', () => {
   let homeDir: string;
-  let workdir: string;
+  let eigenfluxHome: string;
 
-  let apiHttpServer: http.Server;
-  let apiPort: number;
-  let apiRequestCount: number;
-  let apiAuthHeader: string | undefined;
-  let apiUserAgentHeader: string | undefined;
-  let apiPluginVersionHeader: string | undefined;
-  let apiHostKindHeader: string | undefined;
-  let apiFeedItems: Array<{
+  let gatewayHttpServer: http.Server;
+  let gatewayWss: WebSocketServer;
+  let gatewayPort: number;
+
+  let feedItems: Array<{
     item_id: string;
     group_id?: string;
     broadcast_type: string;
     updated_at: number;
   }>;
 
-  let gatewayHttpServer: http.Server;
-  let gatewayWss: WebSocketServer;
-  let gatewayPort: number;
-
   beforeEach(async () => {
     homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-home-'));
-    (os.homedir as jest.MockedFunction<typeof os.homedir>).mockReturnValue(homeDir);
-    workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-openclaw-workdir-'));
+    eigenfluxHome = path.join(homeDir, '.eigenflux');
+    __testHomeDir = homeDir;
+    resolveEigenfluxHomeMock.mockReturnValue(eigenfluxHome);
+
+    // Create server credentials
+    const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
+    fs.mkdirSync(serverDir, { recursive: true });
     fs.writeFileSync(
-      path.join(workdir, 'credentials.json'),
+      path.join(serverDir, 'credentials.json'),
       JSON.stringify({ access_token: 'at_integration_token' }),
       'utf-8'
     );
 
-    apiRequestCount = 0;
-    apiAuthHeader = undefined;
-    apiUserAgentHeader = undefined;
-    apiPluginVersionHeader = undefined;
-    apiHostKindHeader = undefined;
-    apiFeedItems = [
+    feedItems = [
       {
         item_id: '501',
         group_id: 'group-int-1',
@@ -83,37 +104,25 @@ describe('register integration', () => {
         updated_at: 1760000000000,
       },
     ];
-    apiHttpServer = http.createServer((req, res) => {
-      if (req.url?.startsWith('/api/v1/items/feed')) {
-        apiRequestCount++;
-        apiAuthHeader = req.headers.authorization;
-        apiUserAgentHeader = req.headers['user-agent'];
-        apiPluginVersionHeader = readHeaderValue(req.headers['x-plugin-ver']);
-        apiHostKindHeader = readHeaderValue(req.headers['x-host-kind']);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            code: 0,
-            msg: 'success',
-            data: {
-              items: apiFeedItems,
-              has_more: false,
-              notifications: [],
-            },
-          })
-        );
-        return;
-      }
 
-      res.writeHead(404);
-      res.end();
+    // Set up execEigenflux to return feed data
+    execEigenfluxMock.mockImplementation(async (bin: string, args: string[]) => {
+      if (args[0] === 'feed' && args[1] === 'poll') {
+        return {
+          kind: 'success',
+          data: {
+            items: feedItems,
+            has_more: false,
+            notifications: [],
+          },
+        };
+      }
+      return { kind: 'error', error: new Error('unknown command'), exitCode: 1, stderr: '' };
     });
-    await new Promise<void>((resolve) => {
-      apiHttpServer.listen(0, '127.0.0.1', () => {
-        apiPort = (apiHttpServer.address() as any).port;
-        resolve();
-      });
-    });
+
+    discoverServersMock.mockResolvedValue([
+      { name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true },
+    ]);
 
     gatewayHttpServer = http.createServer();
     gatewayWss = new WebSocketServer({ server: gatewayHttpServer });
@@ -126,23 +135,14 @@ describe('register integration', () => {
   });
 
   afterEach(async () => {
+    __testHomeDir = undefined;
     fs.rmSync(homeDir, { recursive: true, force: true });
-    fs.rmSync(workdir, { recursive: true, force: true });
-    await new Promise<void>((resolve) => apiHttpServer.close(() => resolve()));
     await new Promise<void>((resolve) => gatewayWss.close(() => resolve()));
     await new Promise<void>((resolve) => gatewayHttpServer.close(() => resolve()));
   });
 
   test('falls back to gateway rpc agent when polling feed returns new items', async () => {
     jest.resetModules();
-    const sessionStorePath = path.join(
-      homeDir,
-      '.openclaw',
-      'agents',
-      'main',
-      'sessions',
-      'sessions.json'
-    );
     const { default: plugin } = await import('./index');
     const services: any[] = [];
     const gatewayMethods: string[] = [];
@@ -211,15 +211,7 @@ describe('register integration', () => {
       },
       pluginConfig: {
         gatewayUrl: `ws://127.0.0.1:${gatewayPort}`,
-        servers: [
-          {
-            name: 'eigenflux',
-            endpoint: `http://127.0.0.1:${apiPort}`,
-            workdir,
-            pollInterval: 60,
-            sessionStorePath,
-          },
-        ],
+        feedPollInterval: 60,
       },
       runtime: {},
       logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -232,12 +224,7 @@ describe('register integration', () => {
     await services[0].start();
     await waitFor(() => agentParams.length === 1);
 
-    expect(apiRequestCount).toBeGreaterThanOrEqual(1);
-    expect(apiAuthHeader).toBe('Bearer at_integration_token');
-    expect(apiUserAgentHeader).toContain('node/');
-    expect(apiUserAgentHeader).not.toContain('eigenflux-plugin');
-    expect(apiPluginVersionHeader).toBe(packageManifest.version);
-    expect(apiHostKindHeader).toBe('openclaw');
+    expect(execEigenfluxMock).toHaveBeenCalled();
     expect(gatewayMethods).toEqual(['connect', 'agent']);
     expect(agentParams[0]).toEqual(
       expect.objectContaining({
@@ -250,12 +237,9 @@ describe('register integration', () => {
     expect(String(agentParams[0].message)).toContain('"item_id": "501"');
     expect(String(agentParams[0].message)).toContain('"group_id": "group-int-1"');
     expect(String(agentParams[0].message)).toContain('network=eigenflux');
-    expect(String(agentParams[0].message)).toContain(`workdir=${workdir}`);
+    expect(String(agentParams[0].message)).toContain(`workdir=${eigenfluxHome}`);
     expect(String(agentParams[0].message)).toContain(
-      `skill_file=http://127.0.0.1:${apiPort}/skill.md`
-    );
-    expect(String(agentParams[0].message)).toContain(
-      `Read http://127.0.0.1:${apiPort}/references/feed.md and follow the skill to process feed payload.`
+      'ef-broadcast skill to process feed payload'
     );
     expect(typeof agentParams[0].idempotencyKey).toBe('string');
     expect(agentParams[0].idempotencyKey.length).toBeGreaterThan(0);
@@ -264,7 +248,7 @@ describe('register integration', () => {
   });
 
   test('dispatches the entire feed payload in a single gateway agent message', async () => {
-    apiFeedItems = [
+    feedItems = [
       {
         item_id: '601',
         group_id: 'group-dup-1',
@@ -280,14 +264,6 @@ describe('register integration', () => {
     ];
 
     jest.resetModules();
-    const sessionStorePath = path.join(
-      homeDir,
-      '.openclaw',
-      'agents',
-      'main',
-      'sessions',
-      'sessions.json'
-    );
     const { default: plugin } = await import('./index');
     const services: any[] = [];
     const agentParams: any[] = [];
@@ -353,15 +329,7 @@ describe('register integration', () => {
       },
       pluginConfig: {
         gatewayUrl: `ws://127.0.0.1:${gatewayPort}`,
-        servers: [
-          {
-            name: 'eigenflux',
-            endpoint: `http://127.0.0.1:${apiPort}`,
-            workdir,
-            pollInterval: 60,
-            sessionStorePath,
-          },
-        ],
+        feedPollInterval: 60,
       },
       runtime: {},
       logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -382,33 +350,8 @@ describe('register integration', () => {
     await services[0].stop();
   });
 
-  test('routes mocked feed notifications to the freshest external session for runtime.subagent', async () => {
+  test('routes feed notifications via runtime.subagent when available', async () => {
     jest.resetModules();
-    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-home-'));
-    const sessionStoreDir = path.join(homeDir, '.openclaw', 'agents', 'main', 'sessions');
-    fs.mkdirSync(sessionStoreDir, { recursive: true });
-    const sessionStorePath = path.join(sessionStoreDir, 'sessions.json');
-    fs.writeFileSync(
-      sessionStorePath,
-      JSON.stringify({
-        'agent:main:main': {
-          updatedAt: 100,
-          deliveryContext: {
-            channel: 'webchat',
-          },
-        },
-        'agent:main:feishu:direct:ou_feed_target': {
-          updatedAt: 200,
-          deliveryContext: {
-            channel: 'feishu',
-            to: 'user:ou_feed_target',
-            accountId: 'default',
-          },
-        },
-      }),
-      'utf-8'
-    );
-
     const { default: plugin } = await import('./index');
     const services: any[] = [];
     const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-subagent-feed' });
@@ -416,15 +359,7 @@ describe('register integration', () => {
     plugin.register({
       config: {},
       pluginConfig: {
-        servers: [
-          {
-            name: 'eigenflux',
-            endpoint: `http://127.0.0.1:${apiPort}`,
-            workdir,
-            pollInterval: 60,
-            sessionStorePath,
-          },
-        ],
+        feedPollInterval: 60,
       },
       runtime: {
         subagent: {
@@ -442,7 +377,7 @@ describe('register integration', () => {
     await waitFor(() => subagentRun.mock.calls.length === 1);
 
     expect(subagentRun).toHaveBeenCalledWith({
-      sessionKey: 'agent:main:feishu:direct:ou_feed_target',
+      sessionKey: 'main',
       message: expect.stringContaining('[EIGENFLUX_FEED_PAYLOAD]'),
       deliver: true,
       idempotencyKey: expect.any(String),
@@ -450,6 +385,5 @@ describe('register integration', () => {
     expect(String(subagentRun.mock.calls[0]?.[0]?.message)).toContain('"item_id": "501"');
 
     await services[0].stop();
-    fs.rmSync(homeDir, { recursive: true, force: true });
   });
 });

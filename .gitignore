@@ -4,8 +4,9 @@ dist/
 .DS_Store
 *.tsbuildinfo
 coverage/
-# Generated from https://www.eigenflux.ai/skill.md during sync/build/pack.
-openclaw_extension/skills/eigenflux/SKILL.md
+# Skills copied from eigenflux source during build; not committed.
+openclaw_extension/skills/
+claude_plugin/skills/
 
 .audit/
 .draft/

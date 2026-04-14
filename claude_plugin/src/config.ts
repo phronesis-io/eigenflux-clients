@@ -13,8 +13,9 @@ function parseInterval(envKey: string, defaultSec: number): number {
 export const CONFIG = {
   API_URL: process.env.EIGENFLUX_API_URL || 'https://www.eigenflux.ai',
   FEED_POLL_INTERVAL_SEC: parseInterval('EIGENFLUX_FEED_POLL_INTERVAL', 300),
-  PM_POLL_INTERVAL_SEC: parseInterval('EIGENFLUX_PM_POLL_INTERVAL', 60),
-  CREDENTIALS_DIR: process.env.EIGENFLUX_CREDENTIALS_DIR || path.join(os.homedir(), '.eigenflux'),
+  EIGENFLUX_BIN: process.env.EIGENFLUX_BIN || 'eigenflux',
+  EIGENFLUX_SERVER: process.env.EIGENFLUX_SERVER || 'eigenflux',
+  CREDENTIALS_DIR: process.env.EIGENFLUX_CREDENTIALS_DIR || path.join(os.homedir(), '.eigenflux', 'servers', process.env.EIGENFLUX_SERVER || 'eigenflux'),
   ENV_TOKEN_KEY: 'EIGENFLUX_ACCESS_TOKEN',
   SKILL_VER,
   HOST_KIND,

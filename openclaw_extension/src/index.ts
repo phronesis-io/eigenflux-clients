@@ -1,27 +1,30 @@
+import * as path from 'path';
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
 
 import {
   EigenFluxPollingClient,
-  AuthRequiredEvent,
-  FeedResponse,
+  type AuthRequiredEvent,
+  type FeedResponse,
 } from './polling-client';
-import { EigenFluxPmPollingClient, PmFetchResponse } from './pm-polling-client';
+import { EigenFluxStreamClient, type PmStreamEvent } from './stream-client';
+import { execEigenflux } from './cli-executor';
 import { Logger } from './logger';
 import { AuthState, CredentialsLoader } from './credentials-loader';
 import {
-  buildEigenFluxRequestHeaders,
   PLUGIN_CONFIG,
   PLUGIN_CONFIG_SCHEMA,
   resolvePluginConfig,
-  resolveServerSkillPath,
+  resolveEigenfluxHome,
+  discoverServers,
   type ResolvedEigenFluxPluginConfig,
-  type ResolvedEigenFluxServerConfig,
+  type RoutingConfig,
+  type DiscoveredServer,
 } from './config';
 import { resolveNotificationRoute } from './notification-route-resolver';
 import {
   buildAuthRequiredPromptTemplate,
   buildFeedPayloadPromptTemplate,
-  buildPmPayloadPromptTemplate,
+  buildPmStreamEventPromptTemplate,
   type EigenFluxPromptServerContext,
 } from './agent-prompt-templates';
 import { EigenFluxNotifier } from './notifier';
@@ -42,11 +45,6 @@ type ProfileResponseData = {
   influence: JsonRecord;
 };
 
-type AuthPromptContext = {
-  authEvent: AuthRequiredEvent;
-  authState?: AuthState;
-};
-
 type CommandRouteContext = {
   channel?: string;
   to?: string;
@@ -61,11 +59,12 @@ type CommandRouteContext = {
 };
 
 type ServerRuntime = {
-  server: ResolvedEigenFluxServerConfig;
+  server: DiscoveredServer;
+  routing: RoutingConfig;
   credentialsLoader: CredentialsLoader;
   notifier: EigenFluxNotifier;
-  pollingClient: EigenFluxPollingClient;
-  pmPollingClient: EigenFluxPmPollingClient;
+  feedPoller: EigenFluxPollingClient;
+  streamClient: EigenFluxStreamClient;
   getPromptContext: () => EigenFluxPromptServerContext;
 };
 
@@ -82,45 +81,71 @@ type ServerRuntimeSelection = {
 const COMMAND_NAMES = ['auth', 'profile', 'servers', 'feed', 'pm', 'here'] as const;
 const COMMAND_NAME_SET = new Set<string>(COMMAND_NAMES);
 
-function readServerSessionStorePath(
-  server: ResolvedEigenFluxServerConfig
-): string | undefined {
-  return (server as ResolvedEigenFluxServerConfig & { sessionStorePath?: string })
-    .sessionStorePath;
-}
+const DEFAULT_ROUTING: RoutingConfig = {
+  sessionKey: PLUGIN_CONFIG.DEFAULT_SESSION_KEY,
+  agentId: PLUGIN_CONFIG.DEFAULT_AGENT_ID,
+  routeOverrides: {
+    sessionKey: false,
+    agentId: false,
+    replyChannel: false,
+    replyTo: false,
+    replyAccountId: false,
+  },
+};
 
 function register(api: OpenClawPluginApi): void {
   const logger = new Logger(api.logger);
   logger.info('EigenFlux activating...');
 
   const pluginConfig = resolvePluginConfig(api.pluginConfig, api.config as any, logger);
-  const runtimes = pluginConfig.servers.map((server) =>
-    createServerRuntime(api, logger, pluginConfig, server)
-  );
-  const enabledRuntimes = runtimes.filter((runtime) => runtime.server.enabled);
+  const eigenfluxHome = resolveEigenfluxHome();
 
-  if (!pluginConfig.gatewayToken) {
-    logger.warn(
-      'OpenClaw gateway token not found in config.gateway.auth.token or plugin config; Gateway RPC fallback may fail when gateway auth mode is token'
-    );
-  }
+  let runtimes: ServerRuntime[] = [];
 
-  if (enabledRuntimes.length === 0) {
-    logger.warn('No enabled EigenFlux servers configured; background polling services will not start');
-  }
+  // Register a single meta-service that discovers servers on start
+  api.registerService({
+    id: 'eigenflux:discovery',
+    start: async () => {
+      logger.info('Starting EigenFlux discovery service...');
 
-  registerServices(api, logger, enabledRuntimes);
-  registerCommand(api, logger, runtimes);
+      const servers = await discoverServers(pluginConfig.eigenfluxBin, logger);
+      if (servers.length === 0) {
+        logger.warn('No EigenFlux servers discovered; services will not start');
+        return;
+      }
 
-  logger.info(
-    `EigenFlux activated with ${enabledRuntimes.length}/${runtimes.length} enabled server(s)`
-  );
+      logger.info(`Discovered ${servers.length} server(s): ${servers.map((s) => s.name).join(', ')}`);
+
+      runtimes = servers.map((server) =>
+        createServerRuntime(api, logger, pluginConfig, server, eigenfluxHome)
+      );
+
+      for (const runtime of runtimes) {
+        logger.info(`Starting services for server=${runtime.server.name}`);
+        await runtime.feedPoller.start();
+        await runtime.streamClient.start();
+      }
+    },
+    stop: async () => {
+      logger.info('Stopping EigenFlux discovery service...');
+      for (const runtime of runtimes) {
+        logger.info(`Stopping services for server=${runtime.server.name}`);
+        runtime.feedPoller.stop();
+        await runtime.streamClient.stop();
+      }
+      runtimes = [];
+    },
+  });
+
+  registerCommand(api, logger, pluginConfig, eigenfluxHome, () => runtimes);
+
+  logger.info('EigenFlux activated (servers will be discovered on service start)');
 }
 
 const plugin = {
   id: 'openclaw-eigenflux',
   name: 'EigenFlux',
-  description: 'OpenClaw extension for EigenFlux periodic polling with multi-server delivery',
+  description: 'OpenClaw extension for EigenFlux with CLI-based feed polling and PM streaming',
   configSchema: PLUGIN_CONFIG_SCHEMA,
   register,
 };
@@ -131,28 +156,32 @@ function createServerRuntime(
   api: OpenClawPluginApi,
   logger: Logger,
   pluginConfig: ResolvedEigenFluxPluginConfig,
-  server: ResolvedEigenFluxServerConfig
+  server: DiscoveredServer,
+  eigenfluxHome: string
 ): ServerRuntime {
-  const credentialsLoader = new CredentialsLoader(logger, server.workdir);
+  const routing = pluginConfig.serverRouting[server.name] ?? DEFAULT_ROUTING;
+  const serverDataDir = path.join(eigenfluxHome, 'servers', server.name);
+
+  const credentialsLoader = new CredentialsLoader(logger, eigenfluxHome, server.name);
+
   const notifier = new EigenFluxNotifier(api, logger, {
     gatewayUrl: pluginConfig.gatewayUrl,
     gatewayToken: pluginConfig.gatewayToken,
-    workdir: server.workdir,
-    sessionKey: server.sessionKey,
-    agentId: server.agentId,
-    replyChannel: server.replyChannel,
-    replyTo: server.replyTo,
-    replyAccountId: server.replyAccountId,
+    workdir: serverDataDir,
+    sessionKey: routing.sessionKey,
+    agentId: routing.agentId,
+    replyChannel: routing.replyChannel,
+    replyTo: routing.replyTo,
+    replyAccountId: routing.replyAccountId,
     openclawCliBin: pluginConfig.openclawCliBin,
-    sessionStorePath: readServerSessionStorePath(server),
-    routeOverrides: server.routeOverrides,
+    routeOverrides: routing.routeOverrides,
   });
 
   const getPromptContext = (): EigenFluxPromptServerContext => ({
     serverName: server.name,
     endpoint: server.endpoint,
-    workdir: server.workdir,
-    skillPath: resolveServerSkillPath(server),
+    eigenfluxHome,
+    skills: pluginConfig.skills,
   });
 
   let lastAuthPromptKey: string | null = null;
@@ -162,82 +191,62 @@ function createServerRuntime(
   };
 
   const notifyAuthRequired = async (authEvent: AuthRequiredEvent): Promise<void> => {
-    const promptKey = `${authEvent.reason}:${authEvent.credentialsPath}:${authEvent.source || 'unknown'}`;
+    const promptKey = `auth_required:${server.name}`;
     if (lastAuthPromptKey === promptKey) {
-      logger.debug(`Skipping duplicate auth prompt for server=${server.name}, key=${promptKey}`);
+      logger.debug(`Skipping duplicate auth prompt for server=${server.name}`);
       return;
     }
 
     lastAuthPromptKey = promptKey;
-    const authState = credentialsLoader.loadAuthState();
     await notifier.deliver(
-      buildAuthRequiredMessage(getPromptContext(), {
-        authEvent,
-        authState,
-      })
+      buildAuthRequiredPromptTemplate({ context: getPromptContext() })
     );
   };
 
-  const pollingClient = new EigenFluxPollingClient({
-    apiUrl: server.endpoint,
-    getAuthState: () => credentialsLoader.loadAuthState(),
-    pollIntervalSec: server.pollIntervalSec,
+  const feedPoller = new EigenFluxPollingClient({
+    serverName: server.name,
+    eigenfluxBin: pluginConfig.eigenfluxBin,
+    pollIntervalSec: pluginConfig.feedPollIntervalSec,
     logger,
     onFeedPolled: async (payload: FeedResponse) => {
       resetAuthPromptGate();
-      await notifier.deliver(buildFeedPayloadMessage(getPromptContext(), payload));
+      await notifier.deliver(buildFeedPayloadPromptTemplate(payload, getPromptContext()));
     },
     onAuthRequired: notifyAuthRequired,
   });
 
-  const pmPollingClient = new EigenFluxPmPollingClient({
-    apiUrl: server.endpoint,
-    getAuthState: () => credentialsLoader.loadAuthState(),
-    pollIntervalSec: server.pmPollIntervalSec,
+  const streamClient = new EigenFluxStreamClient({
+    serverName: server.name,
+    eigenfluxBin: pluginConfig.eigenfluxBin,
     logger,
-    onPmFetched: async (payload: PmFetchResponse) => {
+    onPmEvent: async (event: PmStreamEvent) => {
       resetAuthPromptGate();
-      await notifier.deliver(buildPmPayloadMessage(getPromptContext(), payload));
+      await notifier.deliver(buildPmStreamEventPromptTemplate(event, getPromptContext()));
     },
-    onAuthRequired: notifyAuthRequired,
+    onAuthRequired: async () => {
+      await notifyAuthRequired({ reason: 'auth_required' });
+    },
   });
 
   return {
     server,
+    routing,
     credentialsLoader,
     notifier,
-    pollingClient,
-    pmPollingClient,
+    feedPoller,
+    streamClient,
     getPromptContext,
   };
 }
 
-function registerServices(
-  api: OpenClawPluginApi,
-  logger: Logger,
-  runtimes: ServerRuntime[]
-): void {
-  for (const runtime of runtimes) {
-    api.registerService({
-      id: `eigenflux:${toServiceIdSegment(runtime.server.name)}`,
-      start: async () => {
-        logger.info(`Starting EigenFlux polling services for server=${runtime.server.name}`);
-        await runtime.pollingClient.start();
-        await runtime.pmPollingClient.start();
-      },
-      stop: async () => {
-        logger.info(`Stopping EigenFlux polling services for server=${runtime.server.name}`);
-        runtime.pollingClient.stop();
-        runtime.pmPollingClient.stop();
-      },
-    });
-  }
-}
+// ─── Command Handler ────────────────────────────────────────────────────────
 
 function registerCommand(
   api: OpenClawPluginApi,
   logger: Logger,
-  runtimes: ServerRuntime[]
+  pluginConfig: ResolvedEigenFluxPluginConfig,
+  eigenfluxHome: string,
+  getRuntimes: () => ServerRuntime[]
 ): void {
   if (!api.registerCommand) {
     logger.warn('registerCommand API unavailable; skipping /eigenflux command registration');
@@ -250,6 +259,7 @@ function registerCommand(
     acceptsArgs: true,
     handler: async (ctx) => {
       const parsed = parseCommandArgs(ctx.args);
+      const runtimes = getRuntimes();
 
       if (parsed.command === 'servers') {
         return {
@@ -264,29 +274,30 @@ function registerCommand(
         };
       }
       const runtime = selection.runtime;
+      const serverDataDir = path.join(eigenfluxHome, 'servers', runtime.server.name);
 
-      await rememberCurrentCommandRouteIfPossible(ctx, runtime.server, logger);
+      await rememberCurrentCommandRouteIfPossible(ctx, runtime, serverDataDir, logger);
 
       switch (parsed.command) {
         case 'auth':
           return {
-            text: buildAuthStatusText(runtime.server, runtime.credentialsLoader.loadAuthState()),
+            text: buildAuthStatusText(runtime),
           };
         case 'profile':
           return {
-            text: await buildProfileText(runtime, runtime.credentialsLoader.loadAuthState()),
+            text: await buildProfileText(runtime, pluginConfig.eigenfluxBin),
           };
         case 'feed':
           return {
-            text: await buildFeedText(runtime, runtime.credentialsLoader.loadAuthState()),
+            text: await buildFeedText(runtime),
           };
         case 'pm':
           return {
-            text: await buildPmPollText(runtime, runtime.credentialsLoader.loadAuthState()),
+            text: buildPmStatusText(runtime),
           };
         case 'here':
           return {
-            text: await buildHereText(ctx, runtime.server, logger),
+            text: await buildHereText(ctx, runtime, serverDataDir, logger),
           };
         default:
           return {
@@ -325,7 +336,7 @@ function selectServerRuntime(
 ): ServerRuntimeSelection {
   if (runtimes.length === 0) {
     return {
-      error: 'No EigenFlux servers are configured.',
+      error: 'No EigenFlux servers discovered. Ensure eigenflux CLI is configured with at least one server.',
     };
   }
 
@@ -353,21 +364,20 @@ function selectServerRuntime(
 
 function buildServersText(runtimes: ServerRuntime[]): string {
   if (runtimes.length === 0) {
-    return 'No EigenFlux servers are configured.';
+    return 'No EigenFlux servers discovered.';
   }
 
-  const defaultRuntime = runtimes[0];
-
   return [
-    'EigenFlux servers:',
+    'EigenFlux servers (discovered via CLI):',
     ...runtimes.map((runtime) => {
       const flags = [
-        runtime.server.enabled ? 'enabled' : 'disabled',
-        defaultRuntime?.server.name === runtime.server.name ? 'default' : null,
+        runtime.server.current ? 'default' : null,
+        runtime.streamClient.isRunning() ? 'streaming' : null,
       ]
         .filter(Boolean)
         .join(', ');
-      return `- ${runtime.server.name}: ${flags}; endpoint=${runtime.server.endpoint}; workdir=${runtime.server.workdir}`;
+      const suffix = flags ? ` (${flags})` : '';
+      return `- ${runtime.server.name}: endpoint=${runtime.server.endpoint}${suffix}`;
     }),
   ].join('\n');
 }
@@ -383,23 +393,12 @@ function buildHelpText(runtimes: ServerRuntime[]): string {
       ? `Available servers: ${runtimes.map((runtime) => runtime.server.name).join(', ')}`
       : undefined,
     '',
-    '/eigenflux auth',
-    'Show current EigenFlux credential status.',
-    '',
-    '/eigenflux profile',
-    'Fetch /api/v1/agents/me with the current access token.',
-    '',
-    '/eigenflux servers',
-    'List configured EigenFlux servers.',
-    '',
-    '/eigenflux feed',
-    'Run one feed refresh and return the raw feed payload.',
-    '',
-    '/eigenflux pm',
-    'Run one PM fetch and return the raw PM payload.',
-    '',
-    '/eigenflux here',
-    'Remember the current conversation as the default delivery route for the selected server.',
+    '/eigenflux auth — Show credential status',
+    '/eigenflux profile — Fetch agent profile',
+    '/eigenflux servers — List discovered servers',
+    '/eigenflux feed — Run one feed refresh',
+    '/eigenflux pm — Show PM stream status',
+    '/eigenflux here — Remember current conversation as delivery route',
   ]
     .filter(Boolean)
     .join('\n');
@@ -429,7 +428,8 @@ function isInternalAgentSessionKey(value: string | undefined): boolean {
 
 async function resolveCurrentCommandRoute(
   ctx: CommandRouteContext,
-  serverConfig: ResolvedEigenFluxServerConfig,
+  runtime: ServerRuntime,
+  serverDataDir: string,
   logger: Logger
 ) {
   const channel = normalizeChannel(ctx.channel);
@@ -466,12 +466,11 @@ async function resolveCurrentCommandRoute(
   const route = resolveNotificationRoute(
     {
       sessionKey: 'main',
-      agentId: serverConfig.agentId,
+      agentId: runtime.routing.agentId,
       replyChannel,
       replyTo,
       replyAccountId,
-      sessionStorePath: readServerSessionStorePath(serverConfig),
-      workdir: serverConfig.workdir,
+      workdir: serverDataDir,
       routeOverrides: {
         sessionKey: false,
         agentId: false,
@@ -488,11 +487,11 @@ async function resolveCurrentCommandRoute(
   }
 
   if (isInternalAgentSessionKey(route.sessionKey)) {
-    const configuredSessionKey = readNonEmptyString(serverConfig.sessionKey);
+    const configuredSessionKey = readNonEmptyString(runtime.routing.sessionKey);
     if (configuredSessionKey && !isInternalAgentSessionKey(configuredSessionKey)) {
       return {
         sessionKey: configuredSessionKey,
-        agentId: readNonEmptyString(serverConfig.agentId) ?? route.agentId,
+        agentId: readNonEmptyString(runtime.routing.agentId) ?? route.agentId,
         replyChannel: route.replyChannel,
         replyTo: route.replyTo,
         replyAccountId: route.replyAccountId,
@@ -505,24 +504,25 @@ async function resolveCurrentCommandRoute(
 
 async function buildHereText(
   ctx: CommandRouteContext,
-  serverConfig: ResolvedEigenFluxServerConfig,
+  runtime: ServerRuntime,
+  serverDataDir: string,
   logger: Logger
 ): Promise<string> {
-  const route = await resolveCurrentCommandRoute(ctx, serverConfig, logger);
+  const route = await resolveCurrentCommandRoute(ctx, runtime, serverDataDir, logger);
   if (!route || route.sessionKey === 'main' || route.sessionKey.endsWith(':main')) {
     return [
-      `Unable to resolve the current external session for server=${serverConfig.name}.`,
+      `Unable to resolve the current external session for server=${runtime.server.name}.`,
       'Run `/eigenflux here` inside the target conversation after OpenClaw has already created a session for it.',
     ].join('\n');
   }
 
-  const saved = writeStoredNotificationRoute(serverConfig.workdir, route, logger);
+  const saved = writeStoredNotificationRoute(serverDataDir, route, logger);
   if (!saved) {
-    return `Failed to persist the current EigenFlux route for server=${serverConfig.name}; check plugin logs for details.`;
+    return `Failed to persist the current EigenFlux route for server=${runtime.server.name}; check plugin logs for details.`;
   }
 
   return [
-    `EigenFlux server ${serverConfig.name} will deliver to this conversation by default:`,
+    `EigenFlux server ${runtime.server.name} will deliver to this conversation by default:`,
     `sessionKey: ${route.sessionKey}`,
     `agentId: ${route.agentId}`,
     `channel: ${route.replyChannel ?? 'unknown'}`,
@@ -535,58 +535,66 @@ async function buildHereText(
 
 async function rememberCurrentCommandRouteIfPossible(
   ctx: CommandRouteContext,
-  serverConfig: ResolvedEigenFluxServerConfig,
+  runtime: ServerRuntime,
+  serverDataDir: string,
   logger: Logger
 ): Promise<void> {
-  const route = await resolveCurrentCommandRoute(ctx, serverConfig, logger);
+  const route = await resolveCurrentCommandRoute(ctx, runtime, serverDataDir, logger);
   if (!route || route.sessionKey === 'main' || route.sessionKey.endsWith(':main')) {
     return;
   }
 
-  if (writeStoredNotificationRoute(serverConfig.workdir, route, logger)) {
+  if (writeStoredNotificationRoute(serverDataDir, route, logger)) {
     logger.debug(
-      `Remembered current command route for server=${serverConfig.name}: session_key=${route.sessionKey}, channel=${route.replyChannel ?? 'unknown'}, to=${route.replyTo ?? 'unknown'}`
+      `Remembered current command route for server=${runtime.server.name}: session_key=${route.sessionKey}, channel=${route.replyChannel ?? 'unknown'}, to=${route.replyTo ?? 'unknown'}`
     );
   }
+}
+
+// ─── Command Handlers ───────────────────────────────────────────────────────
+
+function buildAuthStatusText(runtime: ServerRuntime): string {
+  const authState = runtime.credentialsLoader.loadAuthState();
+  const lines = [`EigenFlux auth status (server=${runtime.server.name}):`];
+  lines.push(`- credentials_path: ${authState.credentialsPath}`);
+  lines.push(`- status: ${authState.status}`);
+  if (authState.expiresAt) {
+    lines.push(`- expires_at: ${authState.expiresAt}`);
+  }
+  if (authState.status === 'available') {
+    lines.push(`- token: ${maskToken(authState.accessToken)}`);
+  } else {
+    lines.push('- token: unavailable');
+  }
+  return lines.join('\n');
 }
 
 async function buildProfileText(
   runtime: ServerRuntime,
-  authState: AuthState
+  eigenfluxBin: string
 ): Promise<string> {
-  if (authState.status !== 'available') {
-    return buildAuthRequiredMessage(runtime.getPromptContext(), {
-      authEvent: {
-        reason: authState.status === 'expired' ? 'expired_token' : 'missing_token',
-        credentialsPath: authState.credentialsPath,
-        source: authState.source,
-        expiresAt: authState.expiresAt,
-      },
-      authState,
-    });
+  const result = await execEigenflux<JsonApiSuccess<ProfileResponseData>>(
+    eigenfluxBin,
+    ['profile', 'show', '-s', runtime.server.name, '-f', 'json']
+  );
+
+  if (result.kind === 'auth_required') {
+    return buildAuthRequiredPromptTemplate({ context: runtime.getPromptContext() });
+  }
+  if (result.kind === 'error') {
+    return `Failed to fetch profile for server ${runtime.server.name}: ${result.error.message}`;
   }
 
-  try {
-    const payload = await fetchJson<ProfileResponseData>(
-      `${runtime.server.endpoint}/api/v1/agents/me`,
-      authState.accessToken
-    );
-    return [
-      `EigenFlux profile (server=${runtime.server.name}):`,
-      '```json',
-      safeJsonStringify(payload),
-      '```',
-    ].join('\n');
-  } catch (error) {
-    return `Failed to fetch profile for server ${runtime.server.name}: ${error instanceof Error ? error.message : String(error)}`;
-  }
+  return [
+    `EigenFlux profile (server=${runtime.server.name}):`,
+    '```json',
+    safeJsonStringify(result.data),
+    '```',
+  ].join('\n');
 }
 
-async function buildFeedText(
-  runtime: ServerRuntime,
-  authState: AuthState
-): Promise<string> {
-  const result = await runtime.pollingClient.pollOnce({
+async function buildFeedText(runtime: ServerRuntime): Promise<string> {
+  const result = await runtime.feedPoller.pollOnce({
     notifyFeed: false,
     notifyAuthRequired: false,
   });
@@ -599,10 +607,7 @@ async function buildFeedText(
         '```',
       ].join('\n');
     case 'auth_required':
-      return buildAuthRequiredMessage(runtime.getPromptContext(), {
-        authEvent: result.authEvent,
-        authState,
-      });
+      return buildAuthRequiredPromptTemplate({ context: runtime.getPromptContext() });
     case 'error':
       return `EigenFlux feed failed for server ${runtime.server.name}: ${result.error.message}`;
     default:
@@ -610,105 +615,24 @@ async function buildFeedText(
   }
 }
 
-async function buildPmPollText(
-  runtime: ServerRuntime,
-  authState: AuthState
-): Promise<string> {
-  const result = await runtime.pmPollingClient.pollOnce({
-    notifyFeed: false,
-    notifyAuthRequired: false,
-  });
-  switch (result.kind) {
-    case 'success':
-      return [
-        `EigenFlux PM poll result (server=${runtime.server.name}):`,
-        '```json',
-        safeJsonStringify(result.payload),
-        '```',
-      ].join('\n');
-    case 'auth_required':
-      return buildAuthRequiredMessage(runtime.getPromptContext(), {
-        authEvent: result.authEvent,
-        authState,
-      });
-    case 'error':
-      return `EigenFlux PM poll failed for server ${runtime.server.name}: ${result.error.message}`;
-    default:
-      return `EigenFlux PM poll finished with an unknown result for server ${runtime.server.name}.`;
-  }
-}
+function buildPmStatusText(runtime: ServerRuntime): string {
+  const running = runtime.streamClient.isRunning();
+  const cursor = runtime.streamClient.getLastCursor();
 
-async function fetchJson<T extends JsonRecord>(
-  url: string,
-  accessToken: string
-): Promise<JsonApiSuccess<T>> {
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: buildEigenFluxRequestHeaders(accessToken),
-  });
-
-  if (response.status === 401) {
-    throw new Error('HTTP 401: unauthorized');
-  }
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  const lines = [`EigenFlux PM stream status (server=${runtime.server.name}):`];
+  lines.push(`- streaming: ${running ? 'active' : 'inactive'}`);
+  if (cursor) {
+    lines.push(`- last_cursor: ${cursor}`);
   }
 
-  const payload = (await response.json()) as JsonApiSuccess<T>;
-  if (payload.code !== 0) {
-    throw new Error(`API error: ${payload.msg}`);
-  }
-  return payload;
-}
-
-function buildAuthStatusText(
-  serverConfig: ResolvedEigenFluxServerConfig,
-  authState: AuthState
-): string {
-  const lines = [`EigenFlux auth status (server=${serverConfig.name}):`];
-  lines.push(`- workdir: ${serverConfig.workdir}`);
-  lines.push(`- credentials_path: ${authState.credentialsPath}`);
-  lines.push(`- status: ${authState.status}`);
-  if (authState.source) {
-    lines.push(`- source: ${authState.source}`);
-  }
-  if (authState.expiresAt) {
-    lines.push(`- expires_at: ${authState.expiresAt}`);
-  }
-
-  if (authState.status === 'available') {
-    lines.push(`- token: ${maskToken(authState.accessToken)}`);
-  } else {
-    lines.push('- token: unavailable');
+  if (!running) {
+    lines.push('PM stream is not running. Check auth status or restart the service.');
   }
 
   return lines.join('\n');
 }
 
-function buildAuthRequiredMessage(
-  promptContext: EigenFluxPromptServerContext,
-  { authEvent, authState }: AuthPromptContext
-): string {
-  return buildAuthRequiredPromptTemplate({
-    ...promptContext,
-    authEvent,
-    maskedToken: authState?.status === 'available' ? maskToken(authState.accessToken) : undefined,
-  });
-}
-
-function buildFeedPayloadMessage(
-  promptContext: EigenFluxPromptServerContext,
-  payload: FeedResponse
-): string {
-  return buildFeedPayloadPromptTemplate(payload, promptContext);
-}
-
-function buildPmPayloadMessage(
-  promptContext: EigenFluxPromptServerContext,
-  payload: PmFetchResponse
-): string {
-  return buildPmPayloadPromptTemplate(payload, promptContext);
-}
+// ─── Utilities ──────────────────────────────────────────────────────────────
 
 function maskToken(token: string): string {
   const trimmed = token.trim();
@@ -724,9 +648,4 @@ function safeJsonStringify(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-function toServiceIdSegment(name: string): string {
-  const sanitized = name.trim().toLowerCase().replace(/[^a-z0-9._-]+/gu, '-');
-  return sanitized || 'default';
 }

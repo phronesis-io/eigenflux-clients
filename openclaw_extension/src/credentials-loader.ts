@@ -1,15 +1,18 @@
 /**
  * Credentials loader for the EigenFlux auth token.
+ *
+ * Reads credentials from the eigenflux CLI's data directory:
+ * ~/.eigenflux/servers/{serverName}/credentials.json
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './logger';
-import { PLUGIN_CONFIG } from './config';
 
 interface EigenFluxCredentials {
   access_token: string;
   email?: string;
+  agent_id?: string;
   expires_at?: number;
 }
 
@@ -17,14 +20,12 @@ export type AuthState =
   | {
       status: 'available';
       accessToken: string;
-      source: 'file';
       credentialsPath: string;
       expiresAt?: number;
       email?: string;
     }
   | {
       status: 'missing' | 'expired';
-      source?: 'file';
       credentialsPath: string;
       expiresAt?: number;
       email?: string;
@@ -32,11 +33,13 @@ export type AuthState =
 
 export class CredentialsLoader {
   private readonly logger: Logger;
-  private readonly workdir: string;
+  private readonly credentialsPath: string;
+  private readonly credentialsDir: string;
 
-  constructor(logger: Logger, workdir: string) {
+  constructor(logger: Logger, eigenfluxHome: string, serverName: string) {
     this.logger = logger;
-    this.workdir = workdir;
+    this.credentialsDir = path.join(eigenfluxHome, 'servers', serverName);
+    this.credentialsPath = path.join(this.credentialsDir, 'credentials.json');
   }
 
   loadAccessToken(): string | null {
@@ -51,11 +54,9 @@ export class CredentialsLoader {
   }
 
   loadAuthState(): AuthState {
-    const credentialsPath = this.resolveCredentialsPath();
-
-    if (fs.existsSync(credentialsPath)) {
+    if (fs.existsSync(this.credentialsPath)) {
       try {
-        const content = fs.readFileSync(credentialsPath, 'utf-8');
+        const content = fs.readFileSync(this.credentialsPath, 'utf-8');
         const credentials: EigenFluxCredentials = JSON.parse(content);
 
         if (credentials.access_token) {
@@ -65,40 +66,36 @@ export class CredentialsLoader {
               this.logger.warn('Access token has expired');
               return {
                 status: 'expired',
-                source: 'file',
-                credentialsPath,
+                credentialsPath: this.credentialsPath,
                 expiresAt: credentials.expires_at,
                 email: credentials.email,
               };
             }
           }
 
-          this.logger.info(`Loaded access token from ${credentialsPath}`);
+          this.logger.info(`Loaded access token from ${this.credentialsPath}`);
           return {
             status: 'available',
             accessToken: credentials.access_token,
-            source: 'file',
-            credentialsPath,
+            credentialsPath: this.credentialsPath,
             expiresAt: credentials.expires_at,
             email: credentials.email,
           };
         }
       } catch (error) {
-        this.logger.error(`Failed to read credentials file: ${credentialsPath}`, error);
+        this.logger.error(`Failed to read credentials file: ${this.credentialsPath}`, error);
       }
     }
 
     return {
       status: 'missing',
-      credentialsPath,
+      credentialsPath: this.credentialsPath,
     };
   }
 
   saveAccessToken(token: string, email?: string, expiresAt?: number): void {
-    const credentialsPath = this.resolveCredentialsPath();
-
-    if (!fs.existsSync(this.workdir)) {
-      fs.mkdirSync(this.workdir, { recursive: true });
+    if (!fs.existsSync(this.credentialsDir)) {
+      fs.mkdirSync(this.credentialsDir, { recursive: true });
     }
 
     const credentials: EigenFluxCredentials = {
@@ -108,14 +105,10 @@ export class CredentialsLoader {
     };
 
     try {
-      fs.writeFileSync(credentialsPath, JSON.stringify(credentials, null, 2), 'utf-8');
-      this.logger.info(`Saved access token to ${credentialsPath}`);
+      fs.writeFileSync(this.credentialsPath, JSON.stringify(credentials, null, 2), 'utf-8');
+      this.logger.info(`Saved access token to ${this.credentialsPath}`);
     } catch (error) {
       this.logger.error('Failed to save credentials file', error);
     }
-  }
-
-  private resolveCredentialsPath(): string {
-    return path.join(this.workdir, PLUGIN_CONFIG.CREDENTIALS_FILE);
   }
 }

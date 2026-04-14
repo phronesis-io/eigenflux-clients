@@ -2,6 +2,9 @@
  * Credentials loader for EigenFlux access token.
  * Priority: {CREDENTIALS_DIR}/credentials.json > EIGENFLUX_ACCESS_TOKEN env var
  *
+ * Reads from the eigenflux CLI's credential store:
+ * ~/.eigenflux/servers/{serverName}/credentials.json
+ *
  * Standalone implementation (no OpenClaw SDK dependency).
  * Uses sync fs operations for simplicity.
  */
@@ -12,6 +15,7 @@ import * as path from 'path';
 interface StoredCredentials {
   access_token: string;
   email?: string;
+  agent_id?: string;
   expires_at?: number;
 }
 

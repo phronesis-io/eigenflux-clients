@@ -1,9 +1,9 @@
 /**
- * Polling client for EigenFlux feed updates
+ * Polling client for EigenFlux feed updates.
+ * Uses the eigenflux CLI (`eigenflux feed poll`) instead of direct HTTP calls.
  */
 
-import { AuthState } from './credentials-loader';
-import { buildEigenFluxRequestHeaders } from './config';
+import { execEigenflux } from './cli-executor';
 import { Logger } from './logger';
 
 export interface FeedItem {
@@ -25,19 +25,21 @@ export interface FeedNotification {
   created_at: number;
 }
 
+export interface FeedResponseData {
+  items: FeedItem[];
+  has_more: boolean;
+  notifications: FeedNotification[];
+}
+
 export interface FeedResponse {
   code: number;
   msg: string;
-  data: {
-    items: FeedItem[];
-    has_more: boolean;
-    notifications: FeedNotification[];
-  };
+  data: FeedResponseData;
 }
 
 export interface PollingClientConfig {
-  apiUrl: string;
-  getAuthState: () => AuthState;
+  serverName: string;
+  eigenfluxBin: string;
   pollIntervalSec: number;
   logger: Logger;
   onFeedPolled: (payload: FeedResponse) => Promise<void>;
@@ -45,11 +47,7 @@ export interface PollingClientConfig {
 }
 
 export interface AuthRequiredEvent {
-  reason: 'missing_token' | 'expired_token' | 'unauthorized';
-  credentialsPath: string;
-  source?: 'file';
-  expiresAt?: number;
-  statusCode?: number;
+  reason: 'auth_required';
 }
 
 export type PollResult =
@@ -89,7 +87,7 @@ export class EigenFluxPollingClient {
 
     this.isRunning = true;
     this.config.logger.info(
-      `Starting polling client (interval: ${this.config.pollIntervalSec}s)`
+      `Starting polling client for server=${this.config.serverName} (interval: ${this.config.pollIntervalSec}s)`
     );
 
     // Initial fetch
@@ -98,7 +96,7 @@ export class EigenFluxPollingClient {
     // Schedule periodic polling
     this.intervalId = setInterval(() => {
       this.pollOnce().catch((err) => {
-        this.config.logger.error(`Polling error: ${this.formatError(err)}`);
+        this.config.logger.error(`Polling error: ${err instanceof Error ? err.message : String(err)}`);
       });
     }, this.config.pollIntervalSec * 1000);
   }
@@ -108,7 +106,7 @@ export class EigenFluxPollingClient {
       return;
     }
 
-    this.config.logger.info('Stopping polling client');
+    this.config.logger.info(`Stopping polling client for server=${this.config.serverName}`);
     this.isRunning = false;
 
     if (this.intervalId) {
@@ -126,86 +124,52 @@ export class EigenFluxPollingClient {
     const run = async (): Promise<PollResult> => {
       const notifyFeed = options.notifyFeed ?? true;
       const notifyAuthRequired = options.notifyAuthRequired ?? true;
-      const authState = this.config.getAuthState();
-      if (authState.status !== 'available') {
-        this.config.logger.warn(
-          `No usable access token available (status=${authState.status}), skipping poll`
-        );
-        const authEvent: AuthRequiredEvent = {
-          reason: authState.status === 'expired' ? 'expired_token' : 'missing_token',
-          credentialsPath: authState.credentialsPath,
-          source: authState.source,
-          expiresAt: authState.expiresAt,
-        };
-        if (notifyAuthRequired) {
-          await this.config.onAuthRequired(authEvent);
-        }
-        return {
-          kind: 'auth_required',
-          authEvent,
-        };
-      }
-
-      const url = `${this.config.apiUrl}/api/v1/items/feed?action=refresh&limit=20`;
 
       try {
-        this.config.logger.info(`Polling feed request: ${url}`);
-        this.config.logger.debug(`Polling: ${url}`);
+        this.config.logger.info(`Polling feed via CLI for server=${this.config.serverName}`);
 
-        const response = await fetch(url, {
-          method: 'GET',
-          headers: buildEigenFluxRequestHeaders(authState.accessToken),
-        });
+        const result = await execEigenflux<FeedResponseData>(
+          this.config.eigenfluxBin,
+          ['feed', 'poll', '--limit', '20', '--action', 'refresh', '-s', this.config.serverName, '-f', 'json'],
+          { logger: this.config.logger }
+        );
 
-        if (response.status === 401) {
-          const authEvent: AuthRequiredEvent = {
-            reason: 'unauthorized',
-            credentialsPath: authState.credentialsPath,
-            source: authState.source,
-            expiresAt: authState.expiresAt,
-            statusCode: 401,
-          };
+        if (result.kind === 'auth_required') {
+          const authEvent: AuthRequiredEvent = { reason: 'auth_required' };
           if (notifyAuthRequired) {
             await this.config.onAuthRequired(authEvent);
           }
-          return {
-            kind: 'auth_required',
-            authEvent,
-          };
+          return { kind: 'auth_required', authEvent };
         }
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        if (result.kind === 'error') {
+          return { kind: 'error', error: result.error };
         }
 
-        const data = (await response.json()) as FeedResponse;
+        // Reconstruct full FeedResponse envelope from CLI data output
+        const feedResponse: FeedResponse = {
+          code: 0,
+          msg: 'success',
+          data: result.data,
+        };
 
-        if (data.code !== 0) {
-          throw new Error(`API error: ${data.msg}`);
-        }
-
-        const items = data.data.items ?? [];
-        const notifications = data.data.notifications ?? [];
+        const items = feedResponse.data.items ?? [];
+        const notifications = feedResponse.data.notifications ?? [];
         this.config.logger.info(
-          `Polled feed: ${items.length} items, notifications=${notifications.length}, has_more=${data.data.has_more}`
+          `Polled feed: ${items.length} items, notifications=${notifications.length}, has_more=${feedResponse.data.has_more}`
         );
 
         if (notifyFeed && (items.length > 0 || notifications.length > 0)) {
-          await this.config.onFeedPolled(data);
+          await this.config.onFeedPolled(feedResponse);
         }
-        return {
-          kind: 'success',
-          payload: data,
-        };
+
+        return { kind: 'success', payload: feedResponse };
       } catch (error) {
         const normalized = error instanceof Error ? error : new Error(String(error));
         this.config.logger.error(
-          `Failed to poll feed (url=${url}): ${this.formatError(normalized)}`
+          `Failed to poll feed for server=${this.config.serverName}: ${normalized.message}`
         );
-        return {
-          kind: 'error',
-          error: normalized,
-        };
+        return { kind: 'error', error: normalized };
       }
     };
 
@@ -213,80 +177,5 @@ export class EigenFluxPollingClient {
       this.activePoll = null;
     });
     return this.activePoll;
-  }
-
-  private formatError(error: unknown): string {
-    const segments: string[] = [];
-    this.appendErrorSegment(segments, error, false);
-    return segments.join(' | ');
-  }
-
-  private appendErrorSegment(segments: string[], error: unknown, isCause: boolean): void {
-    const prefix = isCause ? 'cause=' : '';
-
-    if (error instanceof Error) {
-      const details: string[] = [`${error.name}: ${error.message}`];
-      const metadata = this.errorMetadata(error);
-      if (metadata.length > 0) {
-        details.push(...metadata);
-      }
-      segments.push(prefix + details.join(' | '));
-
-      const cause = (error as Error & { cause?: unknown }).cause;
-      if (cause !== undefined) {
-        this.appendErrorSegment(segments, cause, true);
-      }
-      return;
-    }
-
-    if (error && typeof error === 'object') {
-      const metadata = this.errorMetadata(error);
-      if (metadata.length > 0) {
-        segments.push(prefix + metadata.join(' | '));
-        return;
-      }
-    }
-
-    segments.push(prefix + String(error));
-  }
-
-  private errorMetadata(value: unknown): string[] {
-    if (!value || typeof value !== 'object') {
-      return [];
-    }
-
-    const record = value as {
-      code?: unknown;
-      errno?: unknown;
-      syscall?: unknown;
-      address?: unknown;
-      port?: unknown;
-      status?: unknown;
-      statusText?: unknown;
-    };
-
-    const metadata: string[] = [];
-    if (record.code !== undefined) {
-      metadata.push(`code=${String(record.code)}`);
-    }
-    if (record.errno !== undefined) {
-      metadata.push(`errno=${String(record.errno)}`);
-    }
-    if (record.syscall !== undefined) {
-      metadata.push(`syscall=${String(record.syscall)}`);
-    }
-    if (record.address !== undefined) {
-      metadata.push(`address=${String(record.address)}`);
-    }
-    if (record.port !== undefined) {
-      metadata.push(`port=${String(record.port)}`);
-    }
-    if (record.status !== undefined) {
-      metadata.push(`status=${String(record.status)}`);
-    }
-    if (record.statusText !== undefined) {
-      metadata.push(`status_text=${String(record.statusText)}`);
-    }
-    return metadata;
   }
 }

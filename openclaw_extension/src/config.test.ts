@@ -1,11 +1,9 @@
-import * as fs from 'fs';
 import * as os from 'os';
-import * as path from 'path';
 
 import {
   PLUGIN_CONFIG,
   resolvePluginConfig,
-  resolveServerSkillPath,
+  resolveEigenfluxHome,
 } from './config';
 import { Logger } from './logger';
 
@@ -22,158 +20,21 @@ function createLoggerSpies() {
 }
 
 describe('resolvePluginConfig', () => {
-  test('prepends the default eigenflux server when servers is omitted', () => {
+  test('returns defaults when config is empty', () => {
     const config = resolvePluginConfig({});
 
+    expect(config.eigenfluxBin).toBe(PLUGIN_CONFIG.DEFAULT_EIGENFLUX_BIN);
+    expect(config.feedPollIntervalSec).toBe(PLUGIN_CONFIG.DEFAULT_FEED_POLL_INTERVAL_SEC);
+    expect(config.skills).toEqual(['ef-broadcast', 'ef-communication']);
     expect(config.gatewayUrl).toBe(PLUGIN_CONFIG.DEFAULT_GATEWAY_URL);
     expect(config.openclawCliBin).toBe(PLUGIN_CONFIG.DEFAULT_OPENCLAW_CLI_BIN);
-    expect(config.servers).toHaveLength(1);
-    expect(config.servers[0]).toEqual({
-      enabled: true,
-      name: 'eigenflux',
-      endpoint: PLUGIN_CONFIG.DEFAULT_ENDPOINT,
-      workdir: path.join(os.homedir(), '.openclaw/eigenflux'),
-      pollIntervalSec: PLUGIN_CONFIG.DEFAULT_POLL_INTERVAL_SEC,
-      pmPollIntervalSec: PLUGIN_CONFIG.DEFAULT_PM_POLL_INTERVAL_SEC,
-      sessionKey: PLUGIN_CONFIG.DEFAULT_SESSION_KEY,
-      agentId: PLUGIN_CONFIG.DEFAULT_AGENT_ID,
-      replyChannel: undefined,
-      replyTo: undefined,
-      replyAccountId: undefined,
-      routeOverrides: {
-        sessionKey: false,
-        agentId: false,
-        replyChannel: false,
-        replyTo: false,
-        replyAccountId: false,
-      },
-    });
-  });
-
-  test('prepends the default eigenflux server when no explicit eigenflux server exists', () => {
-    const config = resolvePluginConfig({
-      gatewayUrl: 'ws://127.0.0.1:29999',
-      openclawCliBin: '/opt/bin/openclaw',
-      servers: [
-        {
-          name: 'alpha',
-          endpoint: 'https://alpha.example.com',
-          workdir: '~/custom/alpha',
-          pollInterval: 45,
-          pmPollInterval: 30,
-          sessionKey: 'agent:ops:feishu:direct:ou_alpha',
-        },
-      ],
-    });
-
-    expect(config.gatewayUrl).toBe('ws://127.0.0.1:29999');
-    expect(config.openclawCliBin).toBe('/opt/bin/openclaw');
-    expect(config.servers).toHaveLength(2);
-    expect(config.servers[0]).toEqual(
-      expect.objectContaining({
-        name: 'eigenflux',
-        endpoint: PLUGIN_CONFIG.DEFAULT_ENDPOINT,
-        workdir: path.join(os.homedir(), '.openclaw/eigenflux'),
-      })
-    );
-    expect(config.servers[1]).toEqual({
-      enabled: true,
-      name: 'alpha',
-      endpoint: 'https://alpha.example.com',
-      workdir: path.join(os.homedir(), 'custom/alpha'),
-      pollIntervalSec: 45,
-      pmPollIntervalSec: 30,
-      sessionKey: 'agent:ops:feishu:direct:ou_alpha',
-      agentId: 'ops',
-      replyChannel: 'feishu',
-      replyTo: 'user:ou_alpha',
-      replyAccountId: undefined,
-      routeOverrides: {
-        sessionKey: true,
-        agentId: false,
-        replyChannel: false,
-        replyTo: false,
-        replyAccountId: false,
-      },
-    });
-  });
-
-  test('does not prepend another default server when eigenflux is explicitly configured', () => {
-    const config = resolvePluginConfig({
-      servers: [
-        {
-          name: 'eigenflux',
-          workdir: '~/custom/eigenflux',
-          pollInterval: 15,
-        },
-        {
-          name: 'alpha',
-          endpoint: 'https://alpha.example.com',
-        },
-      ],
-    });
-
-    expect(config.servers).toHaveLength(2);
-    expect(config.servers[0]).toEqual(
-      expect.objectContaining({
-        name: 'eigenflux',
-        endpoint: 'https://www.eigenflux.ai',
-        workdir: path.join(os.homedir(), 'custom/eigenflux'),
-        pollIntervalSec: 15,
-      })
-    );
-    expect(config.servers[1]).toEqual(
-      expect.objectContaining({
-        name: 'alpha',
-        endpoint: 'https://alpha.example.com',
-      })
-    );
-  });
-
-  test('ignores schema-defaulted main session fields so route discovery stays automatic', () => {
-    const config = resolvePluginConfig({
-      servers: [
-        {
-          name: 'eigenflux',
-          sessionKey: 'main',
-          agentId: 'main',
-        },
-      ],
-    });
-
-    expect(config.servers[0]).toEqual(
-      expect.objectContaining({
-        sessionKey: 'main',
-        agentId: 'main',
-        routeOverrides: {
-          sessionKey: false,
-          agentId: false,
-          replyChannel: false,
-          replyTo: false,
-          replyAccountId: false,
-        },
-      })
-    );
-  });
-
-  test('creates unique names when duplicate server names are configured', () => {
-    const config = resolvePluginConfig({
-      servers: [{ name: 'eigenflux' }, { name: 'eigenflux' }, {}],
-    });
-
-    expect(config.servers.map((server) => server.name)).toEqual([
-      'eigenflux',
-      'eigenflux-2',
-      'server-3',
-    ]);
-    expect(config.servers[2].workdir).toBe(path.join(os.homedir(), '.openclaw/server-3'));
+    expect(config.serverRouting).toEqual({});
+    expect(config.gatewayToken).toBeUndefined();
   });
 
   test('uses gateway auth token from host config when plugin config omits it', () => {
     const config = resolvePluginConfig(
-      {
-        servers: [{ name: 'eigenflux' }],
-      },
+      {},
       {
         gateway: {
           auth: {
@@ -186,104 +47,161 @@ describe('resolvePluginConfig', () => {
     expect(config.gatewayToken).toBe('gw_host_token');
   });
 
-  test('clamps oversized polling intervals to one day and logs a warning', () => {
+  test('plugin-level gatewayToken overrides host config token', () => {
+    const config = resolvePluginConfig(
+      { gatewayToken: 'plugin_token' },
+      {
+        gateway: {
+          auth: {
+            token: 'gw_host_token',
+          },
+        },
+      }
+    );
+
+    expect(config.gatewayToken).toBe('plugin_token');
+  });
+
+  test('resolves custom eigenfluxBin and openclawCliBin', () => {
+    const config = resolvePluginConfig({
+      eigenfluxBin: '/opt/bin/eigenflux',
+      openclawCliBin: '/opt/bin/openclaw',
+    });
+
+    expect(config.eigenfluxBin).toBe('/opt/bin/eigenflux');
+    expect(config.openclawCliBin).toBe('/opt/bin/openclaw');
+  });
+
+  test('resolves custom skills array', () => {
+    const config = resolvePluginConfig({
+      skills: ['ef-broadcast', 'ef-profile', 'custom-skill'],
+    });
+
+    expect(config.skills).toEqual(['ef-broadcast', 'ef-profile', 'custom-skill']);
+  });
+
+  test('filters out non-string and empty skills entries', () => {
+    const config = resolvePluginConfig({
+      skills: ['ef-broadcast', '', 42, null, 'ef-communication'] as any,
+    });
+
+    expect(config.skills).toEqual(['ef-broadcast', 'ef-communication']);
+  });
+
+  test('resolves serverRouting with defaults for missing fields', () => {
+    const config = resolvePluginConfig({
+      serverRouting: {
+        alpha: {
+          sessionKey: 'agent:ops:feishu:direct:ou_alpha',
+        },
+      },
+    });
+
+    const routing = config.serverRouting['alpha'];
+    expect(routing).toBeDefined();
+    expect(routing.sessionKey).toBe('agent:ops:feishu:direct:ou_alpha');
+    expect(routing.agentId).toBe('ops');
+    expect(routing.replyChannel).toBe('feishu');
+    expect(routing.replyTo).toBe('user:ou_alpha');
+  });
+
+  test('ignores schema-defaulted main session fields so route discovery stays automatic', () => {
+    const config = resolvePluginConfig({
+      serverRouting: {
+        eigenflux: {
+          sessionKey: 'main',
+          agentId: 'main',
+        },
+      },
+    });
+
+    const routing = config.serverRouting['eigenflux'];
+    expect(routing).toBeDefined();
+    expect(routing.routeOverrides).toEqual({
+      sessionKey: false,
+      agentId: false,
+      replyChannel: false,
+      replyTo: false,
+      replyAccountId: false,
+    });
+  });
+
+  test('clamps oversized feedPollInterval to one day and logs a warning', () => {
     const loggerSpies = createLoggerSpies();
     const config = resolvePluginConfig(
-      {
-        servers: [
-          {
-            name: 'eigenflux',
-            pollInterval: 3600000,
-            pmPollInterval: 999999,
-          },
-        ],
-      },
+      { feedPollInterval: 3600000 },
       undefined,
       new Logger(loggerSpies)
     );
 
-    expect(config.servers[0]).toEqual(
-      expect.objectContaining({
-        pollIntervalSec: PLUGIN_CONFIG.MAX_POLL_INTERVAL_SEC,
-        pmPollIntervalSec: PLUGIN_CONFIG.MAX_POLL_INTERVAL_SEC,
-      })
-    );
+    expect(config.feedPollIntervalSec).toBe(PLUGIN_CONFIG.MAX_POLL_INTERVAL_SEC);
     expect(loggerSpies.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[EigenFlux] pollInterval for server "eigenflux" exceeds 86400s; clamping to 86400s')
-    );
-    expect(loggerSpies.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[EigenFlux] pmPollInterval for server "eigenflux" exceeds 86400s; clamping to 86400s')
+      expect.stringContaining('feedPollInterval exceeds 86400s; clamping to 86400s')
     );
   });
 
-  test('clamps undersized polling intervals to ten seconds and logs a warning', () => {
+  test('clamps undersized feedPollInterval to ten seconds and logs a warning', () => {
     const loggerSpies = createLoggerSpies();
     const config = resolvePluginConfig(
-      {
-        servers: [
-          {
-            name: 'eigenflux',
-            pollInterval: 1,
-            pmPollInterval: 5,
-          },
-        ],
-      },
+      { feedPollInterval: 1 },
       undefined,
       new Logger(loggerSpies)
     );
 
-    expect(config.servers[0]).toEqual(
-      expect.objectContaining({
-        pollIntervalSec: PLUGIN_CONFIG.MIN_POLL_INTERVAL_SEC,
-        pmPollIntervalSec: PLUGIN_CONFIG.MIN_POLL_INTERVAL_SEC,
-      })
-    );
+    expect(config.feedPollIntervalSec).toBe(PLUGIN_CONFIG.MIN_POLL_INTERVAL_SEC);
     expect(loggerSpies.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[EigenFlux] pollInterval for server "eigenflux" is below 10s; clamping to 10s')
-    );
-    expect(loggerSpies.warn).toHaveBeenCalledWith(
-      expect.stringContaining('[EigenFlux] pmPollInterval for server "eigenflux" is below 10s; clamping to 10s')
+      expect.stringContaining('feedPollInterval is below 10s; clamping to 10s')
     );
   });
 });
 
-describe('resolveServerSkillPath', () => {
-  test('prefers local workdir skill.md when it exists', () => {
-    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-skill-path-'));
-    const localSkillPath = path.join(workdir, 'skill.md');
-    fs.writeFileSync(localSkillPath, '# local skill\n', 'utf-8');
+describe('resolveEigenfluxHome', () => {
+  const originalEnv = process.env.EIGENFLUX_HOME;
 
-    expect(
-      resolveServerSkillPath({
-        endpoint: 'https://example.com/root',
-        workdir,
-      })
-    ).toBe(localSkillPath);
-
-    fs.rmSync(workdir, { recursive: true, force: true });
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.EIGENFLUX_HOME;
+    } else {
+      process.env.EIGENFLUX_HOME = originalEnv;
+    }
   });
 
-  test('falls back to endpoint skill.md when local file is absent', () => {
-    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-skill-path-'));
+  test('defaults to ~/.eigenflux when EIGENFLUX_HOME is not set', () => {
+    delete process.env.EIGENFLUX_HOME;
 
-    expect(
-      resolveServerSkillPath({
-        endpoint: 'https://example.com/root',
-        workdir,
-      })
-    ).toBe('https://example.com/root/skill.md');
+    const home = resolveEigenfluxHome();
+    expect(home).toBe(`${os.homedir()}/.eigenflux`);
+  });
 
-    fs.rmSync(workdir, { recursive: true, force: true });
+  test('uses EIGENFLUX_HOME env var with .eigenflux suffix appended', () => {
+    process.env.EIGENFLUX_HOME = '/custom/path';
+
+    const home = resolveEigenfluxHome();
+    expect(home).toBe('/custom/path/.eigenflux');
+  });
+
+  test('does not double-append .eigenflux if already present', () => {
+    process.env.EIGENFLUX_HOME = '/custom/path/.eigenflux';
+
+    const home = resolveEigenfluxHome();
+    expect(home).toBe('/custom/path/.eigenflux');
   });
 });
 
 describe('PLUGIN_CONFIG metadata', () => {
   test('keeps runtime metadata aligned with manifests', () => {
-    expect(PLUGIN_CONFIG.USER_AGENT).toContain('node/');
-    expect(PLUGIN_CONFIG.USER_AGENT).toMatch(/\(.*;\s*.*;\s*.*\)/);
-    expect(PLUGIN_CONFIG.USER_AGENT).not.toContain('eigenflux-plugin');
     expect(PLUGIN_CONFIG.PLUGIN_VERSION).toBe(packageManifest.version);
     expect(PLUGIN_CONFIG.PLUGIN_VERSION).toBe(pluginManifest.version);
     expect(PLUGIN_CONFIG.HOST_KIND).toBe('openclaw');
+  });
+
+  test('exports expected constant keys', () => {
+    expect(PLUGIN_CONFIG.DEFAULT_EIGENFLUX_BIN).toBe('eigenflux');
+    expect(PLUGIN_CONFIG.DEFAULT_GATEWAY_URL).toBeDefined();
+    expect(PLUGIN_CONFIG.DEFAULT_SESSION_KEY).toBe('main');
+    expect(PLUGIN_CONFIG.DEFAULT_AGENT_ID).toBe('main');
+    expect(PLUGIN_CONFIG.DEFAULT_FEED_POLL_INTERVAL_SEC).toBeGreaterThan(0);
+    expect(PLUGIN_CONFIG.MIN_POLL_INTERVAL_SEC).toBe(10);
+    expect(PLUGIN_CONFIG.MAX_POLL_INTERVAL_SEC).toBe(86400);
   });
 });

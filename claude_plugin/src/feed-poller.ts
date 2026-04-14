@@ -1,18 +1,18 @@
 /**
  * Feed poller for EigenFlux broadcast items.
- * Periodically calls GET /api/v1/items/feed?action=refresh&limit=20
+ * Uses the eigenflux CLI (`eigenflux feed poll`) instead of direct HTTP calls.
  *
  * All logging goes to stderr (stdout reserved for MCP stdio transport).
  */
 
 import type { FeedResponse } from './types.js';
-import { buildHeaders } from './config.js';
+import { execEigenflux } from './cli-executor.js';
 import { log } from './logger.js';
 
 export interface FeedPollerConfig {
-  apiUrl: string;
+  serverName: string;
+  eigenfluxBin: string;
   pollIntervalSec: number;
-  getAccessToken: () => string | null;
   onFeedUpdate: (payload: FeedResponse) => Promise<void>;
   onAuthRequired: (reason: string) => Promise<void>;
 }
@@ -34,7 +34,7 @@ export class FeedPoller {
     }
 
     this.running = true;
-    log(`[eigenflux:feed] Starting poller (interval: ${this.config.pollIntervalSec}s)`);
+    log(`[eigenflux:feed] Starting poller for server=${this.config.serverName} (interval: ${this.config.pollIntervalSec}s)`);
 
     // Immediate poll, then schedule
     this.pollOnce().catch((err) => {
@@ -61,43 +61,34 @@ export class FeedPoller {
   }
 
   async pollOnce(): Promise<FeedResponse | null> {
-    const token = this.config.getAccessToken();
-    if (!token) {
-      if (!this.authPrompted) {
-        this.authPrompted = true;
-        await this.config.onAuthRequired('missing_or_expired_token');
-      }
-      return null;
-    }
-
-    const url = `${this.config.apiUrl}/api/v1/items/feed?action=refresh&limit=20`;
-
     try {
-      log(`[eigenflux:feed] Polling: ${url}`);
+      log(`[eigenflux:feed] Polling via CLI for server=${this.config.serverName}`);
 
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: buildHeaders(token),
-      });
+      const result = await execEigenflux<FeedResponse['data']>(
+        this.config.eigenfluxBin,
+        ['feed', 'poll', '--limit', '20', '--action', 'refresh', '-s', this.config.serverName, '-f', 'json']
+      );
 
-      if (response.status === 401) {
-        log('[eigenflux:feed] 401 Unauthorized');
+      if (result.kind === 'auth_required') {
+        log('[eigenflux:feed] Auth required');
         if (!this.authPrompted) {
           this.authPrompted = true;
-          await this.config.onAuthRequired('unauthorized');
+          await this.config.onAuthRequired('auth_required');
         }
         return null;
       }
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      if (result.kind === 'error') {
+        log(`[eigenflux:feed] CLI error: ${result.error.message}`);
+        return null;
       }
 
-      const data = (await response.json()) as FeedResponse;
-
-      if (data.code !== 0) {
-        throw new Error(`API error (code=${data.code}): ${data.msg}`);
-      }
+      // Reconstruct full FeedResponse envelope from CLI data output
+      const data: FeedResponse = {
+        code: 0,
+        msg: 'success',
+        data: result.data,
+      };
 
       // Reset auth flag on success
       this.authPrompted = false;

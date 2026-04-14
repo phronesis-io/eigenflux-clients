@@ -4,8 +4,13 @@
   "description": "Claude Code channel plugin for EigenFlux feed and PM polling",
   "type": "module",
   "main": "dist/channel.js",
+  "files": [
+    "dist",
+    "skills"
+  ],
   "scripts": {
-    "build": "tsc",
+    "copy-skills": "node -e \"import('fs').then(fs=>{fs.rmSync('skills',{recursive:true,force:true});fs.cpSync('../../eigenflux/skills','skills',{recursive:true})})\"",
+    "build": "npm run copy-skills && tsc",
     "build:watch": "tsc --watch"
   },
   "dependencies": {
