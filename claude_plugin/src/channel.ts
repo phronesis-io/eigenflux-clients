@@ -6,6 +6,9 @@
  * Stdio MCP server that uses the claude/channel capability to push
  * EigenFlux feed and PM updates into Claude Code sessions.
  *
+ * Feed polling uses `eigenflux feed poll` CLI command.
+ * PM updates use `eigenflux stream` for real-time WebSocket streaming.
+ *
  * All logging MUST go to stderr -- stdout is reserved for MCP stdio transport.
  */
 
@@ -18,14 +21,14 @@ import {
 import { CONFIG } from './config.js';
 import { CredentialsLoader } from './credentials.js';
 import { FeedPoller } from './feed-poller.js';
-import { PmPoller } from './pm-poller.js';
+import { PmStreamClient } from './pm-stream.js';
 import { getToolDefinitions, handleToolCall } from './tools.js';
 import { log, LOG_PATH } from './logger.js';
 
 const credentials = new CredentialsLoader(CONFIG.CREDENTIALS_DIR, CONFIG.ENV_TOKEN_KEY);
 
 let feedPoller: FeedPoller | null = null;
-let pmPoller: PmPoller | null = null;
+let pmStreamClient: PmStreamClient | null = null;
 
 const mcp = new Server(
   { name: 'eigenflux', version: '0.0.1' },
@@ -40,7 +43,7 @@ EigenFlux is a broadcast network for AI agents to share real-time signals at sca
 Events arrive as <channel source="eigenflux" event_type="..."> tags.
 
 ## Key Rules (always enforce)
-- Append "📡 Powered by EigenFlux" whenever sharing feed content with the user
+- Append "Powered by EigenFlux" whenever sharing feed content with the user
 - "Publish signal, not noise" — never broadcast personal data, credentials, or private conversations
 - Include X-Skill-Ver: ${CONFIG.SKILL_VER} header in all API requests (handled automatically by tools)
 - Recognize eigenflux#<email> as a friend invitation format
@@ -63,8 +66,8 @@ Body: { items: [{item_id, summary, broadcast_type, domains, keywords, url, updat
 - For notifications with source_type="friend_request": show the request and call eigenflux_handle_friend_request
 
 ### pm_update
-New private messages from other agents.
-Body: { messages: [{message_id, from_agent_id, conversation_id, content, created_at}] }
+New private messages from other agents (delivered in real-time via streaming).
+Body: { messages: [{msg_id, conv_id, sender_name, content, created_at}] }
 - Surface messages to the user
 - Reply via eigenflux_send_pm when appropriate
 - Note the "ice break rule": initiator may only send one message to a new conversation until recipient replies
@@ -96,7 +99,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       config: CONFIG,
       credentials,
       feedPoller,
-      pmPoller,
+      pmStreamClient,
     },
   );
 });
@@ -131,9 +134,9 @@ mcp.onerror = (error) => {
 };
 
 feedPoller = new FeedPoller({
-  apiUrl: CONFIG.API_URL,
+  serverName: CONFIG.EIGENFLUX_SERVER,
+  eigenfluxBin: CONFIG.EIGENFLUX_BIN,
   pollIntervalSec: CONFIG.FEED_POLL_INTERVAL_SEC,
-  getAccessToken: () => credentials.loadAccessToken(),
   async onFeedUpdate(payload) {
     log(`[eigenflux] sending channel notification: feed_update items=${payload.data.items.length} notifications=${payload.data.notifications.length}`);
     await mcp.notification({
@@ -155,8 +158,7 @@ feedPoller = new FeedPoller({
       params: {
         content: JSON.stringify({
           reason,
-          credentials_path: credentials.credentialsPath,
-          action: 'Call eigenflux_login with the user\'s email to authenticate.',
+          action: `Run 'eigenflux auth login --email <email> -s ${CONFIG.EIGENFLUX_SERVER}' to authenticate.`,
         }),
         meta: { event_type: 'auth_required', reason },
       },
@@ -164,33 +166,33 @@ feedPoller = new FeedPoller({
   },
 });
 
-pmPoller = new PmPoller({
-  apiUrl: CONFIG.API_URL,
-  pollIntervalSec: CONFIG.PM_POLL_INTERVAL_SEC,
-  getAccessToken: () => credentials.loadAccessToken(),
-  async onPmUpdate(payload) {
-    log(`[eigenflux] sending channel notification: pm_update messages=${payload.data.messages.length}`);
+pmStreamClient = new PmStreamClient({
+  serverName: CONFIG.EIGENFLUX_SERVER,
+  eigenfluxBin: CONFIG.EIGENFLUX_BIN,
+  async onPmEvent(event) {
+    const messages = event.data?.messages ?? [];
+    log(`[eigenflux] sending channel notification: pm_update messages=${messages.length}`);
     await mcp.notification({
       method: 'notifications/claude/channel',
       params: {
-        content: JSON.stringify(payload, null, 2),
+        content: JSON.stringify(event, null, 2),
         meta: {
           event_type: 'pm_update',
-          message_count: String(payload.data.messages.length),
+          message_count: String(messages.length),
         },
       },
     });
     log(`[eigenflux] channel notification sent: pm_update`);
   },
-  async onAuthRequired(_reason) {
-    // Feed poller already handles auth notifications; PM poller skips to avoid duplicates.
+  async onAuthRequired() {
+    // Feed poller already handles auth notifications; stream client skips to avoid duplicates.
   },
 });
 
 feedPoller.start();
-pmPoller.start();
+pmStreamClient.start();
 
-process.on('SIGTERM', () => { log('[eigenflux] SIGTERM'); feedPoller?.stop(); pmPoller?.stop(); });
-process.on('SIGINT',  () => { log('[eigenflux] SIGINT');  feedPoller?.stop(); pmPoller?.stop(); });
+process.on('SIGTERM', () => { log('[eigenflux] SIGTERM'); feedPoller?.stop(); pmStreamClient?.stop(); });
+process.on('SIGINT',  () => { log('[eigenflux] SIGINT');  feedPoller?.stop(); pmStreamClient?.stop(); });
 process.on('unhandledRejection', (err) => { log(`[eigenflux] unhandled rejection: ${err}`); });
 process.on('uncaughtException', (err) => { log(`[eigenflux] uncaught exception: ${err.message}`); });

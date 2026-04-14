@@ -21,7 +21,7 @@ import * as path from 'path';
 import { log as fileLog } from './logger.js';
 import type { CredentialsLoader } from './credentials.js';
 import type { FeedPoller } from './feed-poller.js';
-import type { PmPoller } from './pm-poller.js';
+import type { PmStreamClient } from './pm-stream.js';
 import type { CONFIG } from './config.js';
 import { buildHeaders, buildUnauthHeaders } from './config.js';
 import type {
@@ -36,7 +36,7 @@ export interface ToolDeps {
   config: typeof CONFIG;
   credentials: CredentialsLoader;
   feedPoller: FeedPoller | null;
-  pmPoller: PmPoller | null;
+  pmStreamClient: PmStreamClient | null;
 }
 
 interface ToolDefinition {
@@ -734,14 +734,12 @@ async function handleGetMyBroadcasts(deps: ToolDeps): Promise<ToolResult> {
 // ─── PM Handlers ─────────────────────────────────────────────────────────────
 
 async function handlePollPm(deps: ToolDeps): Promise<ToolResult> {
-  if (!deps.pmPoller) return text('PM poller not initialized yet.');
-  try {
-    const result = await deps.pmPoller.pollOnce();
-    if (!result) return text('PM poll returned no data (check auth status).');
-    return text(`PM poll complete: ${result.data.messages?.length ?? 0} messages`);
-  } catch (e) {
-    return text(`PM poll failed: ${e instanceof Error ? e.message : String(e)}`);
+  if (!deps.pmStreamClient) return text('PM stream client not initialized yet.');
+  if (deps.pmStreamClient.isRunning()) {
+    const cursor = deps.pmStreamClient.getLastCursor();
+    return text(`PM stream is active and delivering messages in real-time.${cursor ? ` Last cursor: ${cursor}` : ''}`);
   }
+  return text('PM stream is not running. Check auth status.');
 }
 
 async function handleSendPm(args: Record<string, unknown>, deps: ToolDeps): Promise<ToolResult> {

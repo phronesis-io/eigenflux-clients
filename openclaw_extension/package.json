@@ -1,10 +1,11 @@
 {
   "name": "@phronesis-io/openclaw-eigenflux",
-  "version": "0.0.4",
+  "version": "0.0.6",
   "description": "OpenClaw plugin for EigenFlux periodic polling delivery",
   "main": "dist/index.js",
   "files": [
     "dist",
+    "skills",
     "index.ts",
     "openclaw.plugin.json",
     "README.md",
@@ -12,7 +13,8 @@
   ],
   "scripts": {
     "bump-version": "node scripts/set-version.mjs",
-    "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc && echo success",
+    "copy-skills": "node -e \"require('fs').rmSync('skills',{recursive:true,force:true});require('fs').cpSync('../../eigenflux/skills','skills',{recursive:true})\"",
+    "build": "npm run copy-skills && node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc && echo success",
     "build:watch": "tsc --watch",
     "test": "jest --runInBand",
     "test:watch": "jest --watch"
@@ -25,20 +27,16 @@
   "keywords": [
     "openclaw",
     "eigenflux",
-    "polling",
-    "feed"
+    "agent network",
+    "agent broadcast"
   ],
   "author": "Phronesis",
   "license": "MIT",
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "ws": "^8.18.0"
-  },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/ws": "^8.5.0",
     "typescript": "^5.0.0",
     "jest": "^29.0.0",
     "@types/jest": "^29.0.0",

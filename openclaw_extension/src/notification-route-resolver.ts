@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { type NotificationRouteOverrides } from './config';
 import { Logger } from './logger';
+import { normalizeReplyTarget } from './reply-target';
 import { readStoredNotificationRoute } from './session-route-memory';
 
 const INTERNAL_CHANNELS = new Set(['webchat']);
@@ -43,7 +44,8 @@ export type NotificationRouteConfig = {
   replyTo?: string;
   replyAccountId?: string;
   sessionStorePath?: string;
-  workdir?: string;
+  eigenfluxBin?: string;
+  serverName?: string;
   routeOverrides?: NotificationRouteOverrides;
 };
 
@@ -53,6 +55,17 @@ export type ResolvedNotificationRoute = {
   replyChannel?: string;
   replyTo?: string;
   replyAccountId?: string;
+};
+
+export type NotificationRouteSource = 'config' | 'remembered' | 'session-store' | 'default';
+
+export type ResolvedNotificationRouteResult = {
+  route: ResolvedNotificationRoute;
+  source: NotificationRouteSource;
+};
+
+export type NotificationRouteResolveOptions = {
+  ignoreRemembered?: boolean;
 };
 
 type PreferredRoute = {
@@ -118,6 +131,22 @@ function isExternalChannel(channel: string | undefined): boolean {
   return Boolean(channel && !INTERNAL_CHANNELS.has(channel));
 }
 
+function isDirectSessionKey(sessionKey: string): boolean {
+  const parts = sessionKey.toLowerCase().split(':').filter(Boolean);
+  return parts.includes('direct') || parts.includes('dm');
+}
+
+function isSessionPeerShape(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return (
+    normalized === 'direct' ||
+    normalized === 'dm' ||
+    normalized === 'group' ||
+    normalized === 'channel' ||
+    normalized === 'room'
+  );
+}
+
 function routeTargetMatches(actual: string | undefined, expected: string | undefined): boolean {
   if (!expected) {
     return true;
@@ -159,7 +188,99 @@ function deriveAgentIdFromSessionKey(sessionKey: string | undefined): string | u
   return readNonEmptyString(parts[1]);
 }
 
-function extractExternalRoute(
+function deriveReplyTargetKindFromSessionKey(
+  sessionKey: string | undefined
+): 'user' | 'chat' | 'channel' | 'room' | undefined {
+  const trimmed = readNonEmptyString(sessionKey);
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const parts = trimmed.split(':').filter((part) => part.length > 0);
+  if (parts[0]?.toLowerCase() !== 'agent') {
+    return undefined;
+  }
+
+  const channel = readNonEmptyString(parts[2])?.toLowerCase();
+  const peerShape =
+    parts.length >= 6 && isSessionPeerShape(parts[4])
+      ? parts[4].toLowerCase()
+      : parts.length >= 5 && isSessionPeerShape(parts[3])
+        ? parts[3].toLowerCase()
+        : undefined;
+
+  switch (channel) {
+    case 'feishu':
+      if (peerShape === 'direct' || peerShape === 'dm') {
+        return 'user';
+      }
+      if (peerShape === 'group') {
+        return 'chat';
+      }
+      return undefined;
+    case 'discord':
+      if (peerShape === 'direct' || peerShape === 'dm') {
+        return 'user';
+      }
+      if (peerShape === 'channel') {
+        return 'channel';
+      }
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeSessionStoreTarget(
+  value: unknown,
+  channel: string | undefined,
+  sessionKey: string
+): string | undefined {
+  const trimmed = readNonEmptyString(value);
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const derivedKind = deriveReplyTargetKindFromSessionKey(sessionKey);
+  if (derivedKind && !/^(user|chat|channel|room):/u.test(trimmed)) {
+    return `${derivedKind}:${trimmed}`;
+  }
+
+  return normalizeReplyTarget(trimmed, {
+    channel,
+    sessionKey,
+  });
+}
+
+function deriveChannelFromSessionKey(sessionKey: string): string | undefined {
+  const parts = sessionKey.split(':').filter(Boolean);
+  if (parts[0]?.toLowerCase() !== 'agent') {
+    return undefined;
+  }
+  return normalizeChannel(parts[2]);
+}
+
+function deriveTargetFromSessionKey(
+  sessionKey: string,
+  channel: string | undefined
+): string | undefined {
+  const parts = sessionKey.split(':').filter(Boolean);
+  if (parts[0]?.toLowerCase() !== 'agent') {
+    return undefined;
+  }
+  // Layout: agent:<agentId>:<channel>:<peerShape>:<target>[:<extra>]
+  //     or: agent:<agentId>:<channel>:<peerShape>:<accountId>:<target>
+  if (parts.length < 5 || !isSessionPeerShape(parts[3])) {
+    return undefined;
+  }
+  const rawTarget = parts.length >= 6 ? parts[5] : parts[4];
+  if (!readNonEmptyString(rawTarget)) {
+    return undefined;
+  }
+  return normalizeSessionStoreTarget(rawTarget, channel, sessionKey);
+}
+
+function extractRouteFromEntry(
   sessionKey: string,
   entry: SessionStoreEntry | undefined
 ): ResolvedNotificationRoute | undefined {
@@ -168,17 +289,20 @@ function extractExternalRoute(
   }
 
   const replyChannel =
-    normalizeChannel(entry.deliveryContext?.channel) ?? normalizeChannel(entry.origin?.provider);
+    normalizeChannel(entry.deliveryContext?.channel) ??
+    normalizeChannel(entry.origin?.provider) ??
+    deriveChannelFromSessionKey(sessionKey);
   const replyTo =
-    readNonEmptyString(entry.deliveryContext?.to) ??
-    readNonEmptyString(entry.lastTo) ??
-    readNonEmptyString(entry.origin?.to);
+    normalizeSessionStoreTarget(entry.deliveryContext?.to, replyChannel, sessionKey) ??
+    normalizeSessionStoreTarget(entry.lastTo, replyChannel, sessionKey) ??
+    normalizeSessionStoreTarget(entry.origin?.to, replyChannel, sessionKey) ??
+    deriveTargetFromSessionKey(sessionKey, replyChannel);
   const replyAccountId =
     readNonEmptyString(entry.deliveryContext?.accountId) ??
     readNonEmptyString(entry.lastAccountId) ??
     readNonEmptyString(entry.origin?.accountId);
 
-  if (!isExternalChannel(replyChannel) || !replyTo) {
+  if (!replyChannel || !replyTo) {
     return undefined;
   }
 
@@ -271,9 +395,16 @@ function readSessionStores(
   logger: Logger
 ): SessionStoreSnapshot[] {
   const snapshots: SessionStoreSnapshot[] = [];
-  for (const candidate of listSessionStorePaths(sessionStorePath, baseAgentId)) {
+  const candidates = listSessionStorePaths(sessionStorePath, baseAgentId);
+  logger.info(
+    `Session store scan candidates: base_agent_id=${baseAgentId}, explicit_path=${sessionStorePath ?? 'n/a'}, candidates=${JSON.stringify(candidates)}`
+  );
+  for (const candidate of candidates) {
     const store = readSessionStore(candidate, logger);
     if (store) {
+      logger.info(
+        `Session store loaded: path=${candidate}, entries=${Object.keys(store).length}`
+      );
       snapshots.push({ path: candidate, store });
     }
   }
@@ -324,8 +455,8 @@ function selectExactRoute(
 
   for (const snapshot of snapshots) {
     const entry = snapshot.store[sessionKey];
-    const route = extractExternalRoute(sessionKey, entry);
-    if (!route) {
+    const route = extractRouteFromEntry(sessionKey, entry);
+    if (!route || !isExternalChannel(route.replyChannel)) {
       continue;
     }
     const updatedAt = normalizeUpdatedAt(entry?.updatedAt);
@@ -337,12 +468,27 @@ function selectExactRoute(
   return best;
 }
 
-function selectLatestExternalRoute(
+type RouteCandidate = {
+  route: ResolvedNotificationRoute;
+  updatedAt: number;
+  isExternal: boolean;
+  isDirect: boolean;
+};
+
+/**
+ * Picks the best session route from recent conversation history.
+ *
+ * Preference order (each tier only falls back if the prior tier is empty):
+ *   1. External channel (not in INTERNAL_CHANNELS) over internal channel.
+ *   2. Direct/DM session (sessionKey contains `direct`/`dm`) over non-direct.
+ *   3. Most recent `updatedAt`.
+ */
+function selectBestRoute(
   snapshots: SessionStoreSnapshot[],
   preferred: PreferredRoute | undefined,
   preferredAgentId?: string
 ): RouteSelection | undefined {
-  let best: RouteSelection | undefined;
+  const candidates: RouteCandidate[] = [];
 
   for (const snapshot of snapshots) {
     const pathAgentId = tryDeriveAgentIdFromStorePath(snapshot.path);
@@ -351,7 +497,7 @@ function selectLatestExternalRoute(
         continue;
       }
 
-      const route = extractExternalRoute(sessionKey, entry);
+      const route = extractRouteFromEntry(sessionKey, entry);
       if (!route || !routeMatchesPreferred(route, preferred)) {
         continue;
       }
@@ -360,71 +506,215 @@ function selectLatestExternalRoute(
         continue;
       }
 
-      const updatedAt = normalizeUpdatedAt(entry.updatedAt);
-      if (!best || updatedAt > best.updatedAt) {
-        best = { route, updatedAt };
-      }
+      candidates.push({
+        route,
+        updatedAt: normalizeUpdatedAt(entry.updatedAt),
+        isExternal: isExternalChannel(route.replyChannel),
+        isDirect: isDirectSessionKey(sessionKey),
+      });
     }
   }
 
-  return best;
+  if (candidates.length === 0) {
+    return undefined;
+  }
+
+  const externalPool = candidates.filter((c) => c.isExternal);
+  const channelPool = externalPool.length > 0 ? externalPool : candidates;
+
+  const directPool = channelPool.filter((c) => c.isDirect);
+  const finalPool = directPool.length > 0 ? directPool : channelPool;
+
+  const chosen = finalPool.reduce((best, c) => (c.updatedAt > best.updatedAt ? c : best));
+  return { route: chosen.route, updatedAt: chosen.updatedAt };
 }
 
-export function resolveNotificationRoute(
-  config: NotificationRouteConfig,
+/**
+ * Find a session route that matches the given binding (channel + to + optional
+ * account). Used by `/eigenflux here` to pin delivery to the current conversation.
+ * Falls back through the same external-first / direct-first tiers as startup
+ * discovery.
+ */
+export function findSessionRouteForBinding(
+  options: {
+    sessionStorePath?: string;
+    agentId: string;
+    channel: string;
+    to: string;
+    accountId?: string;
+  },
   logger: Logger
-): ResolvedNotificationRoute {
+): ResolvedNotificationRoute | undefined {
+  const channel = normalizeChannel(options.channel);
+  const to = normalizeReplyTarget(options.to, { channel });
+  const accountId = readNonEmptyString(options.accountId);
+  const agentId = readNonEmptyString(options.agentId) ?? 'main';
+  if (!channel || !to) {
+    return undefined;
+  }
+
+  const snapshots = readSessionStores(options.sessionStorePath, agentId, logger);
+  const best = selectBestRoute(snapshots, { channel, to, accountId }, agentId);
+  if (best) {
+    return best.route;
+  }
+
+  // Fallback: synthesize a sessionKey from agentId + channel + peer shape + target
+  // so `/eigenflux here` can pin the conversation even without a session-store hit.
+  const peerShape = inferPeerShape(channel, to);
+  const targetLocal = stripTargetPrefix(to);
+  if (!peerShape || !targetLocal) {
+    return undefined;
+  }
+  return {
+    sessionKey: `agent:${agentId}:${channel}:${peerShape}:${targetLocal}`,
+    agentId,
+    replyChannel: channel,
+    replyTo: to,
+    replyAccountId: accountId,
+  };
+}
+
+function inferPeerShape(channel: string, to: string): 'direct' | 'group' | 'channel' | undefined {
+  const kind = to.split(':', 1)[0]?.toLowerCase();
+  switch (kind) {
+    case 'user':
+      return 'direct';
+    case 'chat':
+      return channel === 'feishu' ? 'group' : 'direct';
+    case 'channel':
+      return 'channel';
+    case 'room':
+      return 'group';
+    default:
+      return undefined;
+  }
+}
+
+function stripTargetPrefix(to: string): string | undefined {
+  const idx = to.indexOf(':');
+  if (idx === -1) {
+    return readNonEmptyString(to);
+  }
+  return readNonEmptyString(to.slice(idx + 1));
+}
+
+export async function resolveNotificationRoute(
+  config: NotificationRouteConfig,
+  logger: Logger,
+  options: NotificationRouteResolveOptions = {}
+): Promise<ResolvedNotificationRouteResult> {
   const overrides = createRouteOverrides(config.routeOverrides);
 
-  let resolved: ResolvedNotificationRoute = {
+  const configRoute: ResolvedNotificationRoute = {
     sessionKey: readNonEmptyString(config.sessionKey) ?? 'main',
     agentId:
       readNonEmptyString(config.agentId) ??
       deriveAgentIdFromSessionKey(config.sessionKey) ??
       'main',
     replyChannel: normalizeChannel(config.replyChannel),
-    replyTo: readNonEmptyString(config.replyTo),
+    replyTo: normalizeReplyTarget(config.replyTo, {
+      channel: normalizeChannel(config.replyChannel),
+      sessionKey: config.sessionKey,
+    }),
     replyAccountId: readNonEmptyString(config.replyAccountId),
   };
+  logger.info(
+    `Route resolve start: session_key=${configRoute.sessionKey}, agent_id=${configRoute.agentId}, channel=${configRoute.replyChannel ?? 'n/a'}, to=${configRoute.replyTo ?? 'n/a'}, account=${configRoute.replyAccountId ?? 'n/a'}, overrides=${JSON.stringify(overrides)}, ignore_remembered=${options.ignoreRemembered === true}`
+  );
 
-  const snapshots = readSessionStores(config.sessionStorePath, resolved.agentId, logger);
-
-  const exactRoute = selectExactRoute(snapshots, resolved.sessionKey);
-  if (exactRoute) {
-    resolved = mergeRoute(resolved, exactRoute.route, overrides, false);
+  // 1. Explicit config values win.
+  //    Triggered by any of:
+  //      - routeOverrides flag set on a field (plugin config marks user-provided fields)
+  //      - non-internal sessionKey provided directly
+  //      - both replyChannel and replyTo provided directly
+  const hasExplicitConfig =
+    isAnyRouteOverrideEnabled(overrides) ||
+    !isInternalSessionKey(configRoute.sessionKey) ||
+    Boolean(configRoute.replyChannel && configRoute.replyTo);
+  if (hasExplicitConfig) {
+    const snapshots = readSessionStores(config.sessionStorePath, configRoute.agentId, logger);
+    // Try exact sessionKey match first. If config sessionKey is internal but
+    // channel+to are pinned, fall back to peer-shape match to enrich accountId
+    // (and pick up the real sessionKey) from the session store.
+    let enriched = selectExactRoute(snapshots, configRoute.sessionKey)?.route;
+    if (!enriched && configRoute.replyChannel && configRoute.replyTo) {
+      enriched = selectBestRoute(
+        snapshots,
+        {
+          channel: configRoute.replyChannel,
+          to: configRoute.replyTo,
+          accountId: configRoute.replyAccountId,
+        },
+        undefined
+      )?.route;
+    }
+    const resolved = enriched
+      ? mergeRoute(configRoute, enriched, overrides, isInternalSessionKey(configRoute.sessionKey))
+      : configRoute;
+    logger.info(
+      `Route resolve final (config): session_key=${resolved.sessionKey}, agent_id=${resolved.agentId}, channel=${resolved.replyChannel ?? 'n/a'}, to=${resolved.replyTo ?? 'n/a'}, account=${resolved.replyAccountId ?? 'n/a'}`
+    );
+    return { route: resolved, source: 'config' };
   }
 
-  if (!isAnyRouteOverrideEnabled(overrides)) {
-    const rememberedRoute = readStoredNotificationRoute(config.workdir, logger);
-    if (rememberedRoute) {
-      resolved = mergeRoute(resolved, rememberedRoute, overrides, true);
-      const rememberedExact = selectExactRoute(snapshots, resolved.sessionKey);
-      if (rememberedExact) {
-        resolved = mergeRoute(resolved, rememberedExact.route, overrides, false);
+  const snapshots = readSessionStores(config.sessionStorePath, configRoute.agentId, logger);
+
+  // 2. Remembered route (openclaw_deliver_session CLI config).
+  if (options.ignoreRemembered !== true) {
+    const remembered = await readStoredNotificationRoute(
+      config.eigenfluxBin,
+      config.serverName,
+      logger
+    );
+    if (remembered) {
+      logger.info(
+        `Route resolve remembered: session_key=${remembered.sessionKey}, agent_id=${remembered.agentId}, channel=${remembered.replyChannel ?? 'n/a'}, to=${remembered.replyTo ?? 'n/a'}, account=${remembered.replyAccountId ?? 'n/a'}`
+      );
+      // Use remembered replyChannel+replyTo as a peer-shape anchor against
+      // session stores so we resolve the real sessionKey even if remembered
+      // was stored with a stale/internal key.
+      const preferred: PreferredRoute | undefined =
+        remembered.replyChannel && remembered.replyTo
+          ? {
+              channel: remembered.replyChannel,
+              to: remembered.replyTo,
+              accountId: remembered.replyAccountId,
+            }
+          : undefined;
+      const peerMatch = selectBestRoute(snapshots, preferred, undefined);
+      if (peerMatch) {
+        return { route: peerMatch.route, source: 'remembered' };
       }
-      logger.debug(
-        `Resolved notification route via remembered session: session_key=${resolved.sessionKey}, channel=${resolved.replyChannel ?? 'unknown'}, to=${resolved.replyTo ?? 'unknown'}`
+      if (!isInternalSessionKey(remembered.sessionKey)) {
+        return {
+          route: {
+            sessionKey: remembered.sessionKey,
+            agentId: remembered.agentId,
+            replyChannel: remembered.replyChannel,
+            replyTo: remembered.replyTo,
+            replyAccountId: remembered.replyAccountId,
+          },
+          source: 'remembered',
+        };
+      }
+      logger.warn(
+        `Remembered route has internal session_key=${remembered.sessionKey} and no peer match; falling through to session-store scan.`
       );
     }
   }
 
-  if (!isInternalSessionKey(resolved.sessionKey)) {
-    return resolved;
+  // 3. Scan recent conversation history.
+  const best = selectBestRoute(snapshots, undefined, undefined);
+  if (best) {
+    logger.info(
+      `Route resolve from session store: session_key=${best.route.sessionKey}, agent_id=${best.route.agentId}, channel=${best.route.replyChannel ?? 'n/a'}, to=${best.route.replyTo ?? 'n/a'}, account=${best.route.replyAccountId ?? 'n/a'}, updated_at=${best.updatedAt}`
+    );
+    return { route: best.route, source: 'session-store' };
   }
 
-  const preferred = buildPreferredRoute(resolved);
-  const latestRoute = selectLatestExternalRoute(
-    snapshots,
-    preferred,
-    overrides.agentId || overrides.sessionKey ? resolved.agentId : undefined
+  logger.warn(
+    `Route resolve fell back to config default: session_key=${configRoute.sessionKey}, agent_id=${configRoute.agentId}`
   );
-  if (!latestRoute) {
-    return resolved;
-  }
-
-  resolved = mergeRoute(resolved, latestRoute.route, overrides, true);
-  logger.debug(
-    `Resolved notification route via session store: session_key=${resolved.sessionKey}, channel=${resolved.replyChannel ?? 'unknown'}, to=${resolved.replyTo ?? 'unknown'}`
-  );
-  return resolved;
+  return { route: configRoute, source: 'default' };
 }

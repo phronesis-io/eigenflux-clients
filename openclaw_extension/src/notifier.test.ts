@@ -3,6 +3,14 @@ import * as os from 'os';
 import * as path from 'path';
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
 import { Logger } from './logger';
+
+const readStoredNotificationRouteMock = jest.fn();
+const writeStoredNotificationRouteMock = jest.fn();
+jest.mock('./session-route-memory', () => ({
+  readStoredNotificationRoute: (...args: any[]) => readStoredNotificationRouteMock(...args),
+  writeStoredNotificationRoute: (...args: any[]) => writeStoredNotificationRouteMock(...args),
+}));
+
 import { EigenFluxNotifier } from './notifier';
 
 function createLogger(): Logger {
@@ -35,33 +43,33 @@ function createApi(overrides: Partial<OpenClawPluginApi> = {}): OpenClawPluginAp
 
 function createConfig() {
   return {
-    gatewayUrl: 'ws://127.0.0.1:18789',
     sessionKey: 'agent:main:feishu:direct:ou_123',
     agentId: 'main',
     replyChannel: 'feishu',
-    replyTo: 'ou_123',
+    replyTo: 'user:ou_123',
     openclawCliBin: 'openclaw',
   };
 }
 
 describe('EigenFluxNotifier', () => {
+  beforeEach(() => {
+    readStoredNotificationRouteMock.mockReset();
+    writeStoredNotificationRouteMock.mockReset();
+    readStoredNotificationRouteMock.mockResolvedValue(undefined);
+    writeStoredNotificationRouteMock.mockResolvedValue(true);
+  });
+
   test('prefers runtime.subagent delivery when available', async () => {
     const run = jest.fn().mockResolvedValue({ runId: 'run-subagent' });
-    const sendAgentMessage = jest.fn();
 
     const notifier = new EigenFluxNotifier(
       createApi({
         runtime: {
-          subagent: {
-            run,
-          },
+          subagent: { run },
         } as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
-      createConfig(),
-      () => ({
-        sendAgentMessage,
-      })
+      createConfig()
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -71,31 +79,36 @@ describe('EigenFluxNotifier', () => {
       deliver: true,
       idempotencyKey: expect.any(String),
     });
-    expect(sendAgentMessage).not.toHaveBeenCalled();
   });
 
-  test('falls back to gateway rpc agent when runtime.subagent is unavailable', async () => {
-    const sendAgentMessage = jest.fn().mockResolvedValue({
-      sessionKey: 'agent:main:feishu:direct:ou_123',
-      runId: 'run-gateway',
-    });
+  test('treats waitForRun timeout as success (agent still running asynchronously)', async () => {
+    const run = jest.fn().mockResolvedValue({ runId: 'run-subagent-pending' });
+    const waitForRun = jest.fn().mockResolvedValue({ status: 'timeout' });
+    const runCommandWithTimeout = jest.fn();
 
     const notifier = new EigenFluxNotifier(
       createApi({
-        runtime: {} as OpenClawPluginApi['runtime'],
+        runtime: {
+          subagent: { run, waitForRun },
+          system: { runCommandWithTimeout },
+        } as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
-      createConfig(),
-      () => ({
-        sendAgentMessage,
-      })
+      createConfig()
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
-    expect(sendAgentMessage).toHaveBeenCalledWith('[EIGENFLUX_TEST] payload');
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(waitForRun).toHaveBeenCalledTimes(1);
+    // Fallbacks must not run — subagent is still delivering, retrying would dup.
+    expect(runCommandWithTimeout).not.toHaveBeenCalled();
   });
 
-  test('falls back to runtime command agent when gateway rpc fails', async () => {
+  test('falls back to runtime command agent when waitForRun reports error', async () => {
+    const run = jest.fn().mockResolvedValue({ runId: 'run-subagent-fail' });
+    const waitForRun = jest
+      .fn()
+      .mockResolvedValue({ status: 'error', error: 'channel delivery failed' });
     const runCommandWithTimeout = jest.fn().mockResolvedValue({
       code: 0,
       stdout: 'ok',
@@ -105,16 +118,36 @@ describe('EigenFluxNotifier', () => {
     const notifier = new EigenFluxNotifier(
       createApi({
         runtime: {
-          system: {
-            runCommandWithTimeout,
-          },
+          subagent: { run, waitForRun },
+          system: { runCommandWithTimeout },
         } as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
-      createConfig(),
-      () => ({
-        sendAgentMessage: jest.fn().mockRejectedValue(new Error('gateway failed')),
-      })
+      createConfig()
+    );
+
+    await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
+    expect(runCommandWithTimeout).toHaveBeenCalledWith(
+      expect.arrayContaining(['openclaw', 'agent', '--deliver']),
+      { timeoutMs: 15000 }
+    );
+  });
+
+  test('falls back to runtime command agent when runtime.subagent is unavailable', async () => {
+    const runCommandWithTimeout = jest.fn().mockResolvedValue({
+      code: 0,
+      stdout: 'ok',
+      stderr: '',
+    });
+
+    const notifier = new EigenFluxNotifier(
+      createApi({
+        runtime: {
+          system: { runCommandWithTimeout },
+        } as OpenClawPluginApi['runtime'],
+      }),
+      createLogger(),
+      createConfig()
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -130,7 +163,7 @@ describe('EigenFluxNotifier', () => {
         '--reply-channel',
         'feishu',
         '--reply-to',
-        'ou_123',
+        'user:ou_123',
       ],
       { timeoutMs: 15000 }
     );
@@ -149,10 +182,7 @@ describe('EigenFluxNotifier', () => {
         } as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
-      createConfig(),
-      () => ({
-        sendAgentMessage: jest.fn().mockRejectedValue(new Error('gateway failed')),
-      })
+      createConfig()
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -160,7 +190,7 @@ describe('EigenFluxNotifier', () => {
       sessionKey: 'agent:main:feishu:direct:ou_123',
       deliveryContext: {
         channel: 'feishu',
-        to: 'ou_123',
+        to: 'user:ou_123',
       },
     });
     expect(requestHeartbeatNow).toHaveBeenCalledWith({
@@ -171,28 +201,7 @@ describe('EigenFluxNotifier', () => {
     });
   });
 
-  test('deliverWithSubagent only uses runtime.subagent', async () => {
-    const run = jest.fn().mockResolvedValue({ runId: 'run-subagent-only' });
-    const notifier = new EigenFluxNotifier(
-      createApi({
-        runtime: {
-          subagent: {
-            run,
-          },
-        } as OpenClawPluginApi['runtime'],
-      }),
-      createLogger(),
-      createConfig(),
-      () => ({
-        sendAgentMessage: jest.fn(),
-      })
-    );
-
-    await expect(notifier.deliverWithSubagent('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
-    expect(run).toHaveBeenCalledTimes(1);
-  });
-
-  test('resolves the freshest external session route for runtime.subagent', async () => {
+  test('prefers direct session over newer group session when scanning session store', async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-session-store-'));
     const sessionStorePath = path.join(stateDir, 'sessions.json');
     fs.writeFileSync(
@@ -226,9 +235,7 @@ describe('EigenFluxNotifier', () => {
     const notifier = new EigenFluxNotifier(
       createApi({
         runtime: {
-          subagent: {
-            run,
-          },
+          subagent: { run },
         } as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
@@ -239,15 +246,12 @@ describe('EigenFluxNotifier', () => {
         replyTo: undefined,
         replyAccountId: undefined,
         sessionStorePath,
-      },
-      () => ({
-        sendAgentMessage: jest.fn(),
-      })
+      }
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
     expect(run).toHaveBeenCalledWith({
-      sessionKey: 'agent:main:feishu:group:oc_latest',
+      sessionKey: 'agent:main:feishu:direct:ou_older',
       message: '[EIGENFLUX_TEST] payload',
       deliver: true,
       idempotencyKey: expect.any(String),
@@ -283,9 +287,7 @@ describe('EigenFluxNotifier', () => {
     const notifier = new EigenFluxNotifier(
       createApi({
         runtime: {
-          system: {
-            runCommandWithTimeout,
-          },
+          system: { runCommandWithTimeout },
         } as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
@@ -293,12 +295,9 @@ describe('EigenFluxNotifier', () => {
         ...createConfig(),
         sessionKey: 'main',
         replyChannel: 'feishu',
-        replyTo: 'ou_123',
+        replyTo: 'user:ou_123',
         sessionStorePath,
-      },
-      () => ({
-        sendAgentMessage: jest.fn().mockRejectedValue(new Error('gateway failed')),
-      })
+      }
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
@@ -325,36 +324,134 @@ describe('EigenFluxNotifier', () => {
   });
 
   test('remembers the resolved route after a successful delivery', async () => {
-    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-notifier-memory-'));
     const run = jest.fn().mockResolvedValue({ runId: 'run-subagent-memory' });
     const notifier = new EigenFluxNotifier(
       createApi({
         runtime: {
-          subagent: {
-            run,
-          },
+          subagent: { run },
         } as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       {
         ...createConfig(),
-        workdir,
-      },
-      () => ({
-        sendAgentMessage: jest.fn(),
-      })
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      }
     );
 
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
 
-    const remembered = JSON.parse(
-      fs.readFileSync(path.join(workdir, 'session.json'), 'utf-8')
-    ) as Record<string, unknown>;
-    expect(remembered.sessionKey).toBe('agent:main:feishu:direct:ou_123');
-    expect(remembered.agentId).toBe('main');
-    expect(remembered.replyChannel).toBe('feishu');
-    expect(remembered.replyTo).toBe('ou_123');
+    expect(writeStoredNotificationRouteMock).toHaveBeenCalledTimes(1);
+    const [bin, server, route] = writeStoredNotificationRouteMock.mock.calls[0];
+    expect(bin).toBe('eigenflux');
+    expect(server).toBe('eigenflux');
+    expect(route).toMatchObject({
+      sessionKey: 'agent:main:feishu:direct:ou_123',
+      agentId: 'main',
+      replyChannel: 'feishu',
+      replyTo: 'user:ou_123',
+    });
+  });
 
-    fs.rmSync(workdir, { recursive: true, force: true });
+  test('re-resolves fresh route and retries delivery when remembered route fails', async () => {
+    readStoredNotificationRouteMock.mockResolvedValue({
+      sessionKey: 'agent:main:feishu:direct:ou_stale',
+      agentId: 'main',
+      replyChannel: 'feishu',
+      replyTo: 'user:ou_stale',
+      replyAccountId: 'default',
+      updatedAt: 1,
+    });
+
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-retry-'));
+    const sessionStorePath = path.join(stateDir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:feishu:direct:ou_fresh': {
+          updatedAt: 500,
+          deliveryContext: {
+            channel: 'feishu',
+            to: 'user:ou_fresh',
+            accountId: 'default',
+          },
+        },
+      }),
+      'utf-8'
+    );
+
+    const run = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('session expired'))
+      .mockResolvedValueOnce({ runId: 'run-fresh' });
+
+    const notifier = new EigenFluxNotifier(
+      createApi({
+        runtime: {
+          subagent: { run },
+        } as OpenClawPluginApi['runtime'],
+      }),
+      createLogger(),
+      {
+        ...createConfig(),
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+        sessionKey: 'main',
+        replyChannel: undefined,
+        replyTo: undefined,
+        replyAccountId: undefined,
+        sessionStorePath,
+      }
+    );
+
+    await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls[0][0].sessionKey).toBe('agent:main:feishu:direct:ou_stale');
+    expect(run.mock.calls[1][0].sessionKey).toBe('agent:main:feishu:direct:ou_fresh');
+
+    expect(writeStoredNotificationRouteMock).toHaveBeenCalledTimes(1);
+    const [, , savedRoute] = writeStoredNotificationRouteMock.mock.calls[0];
+    expect(savedRoute.sessionKey).toBe('agent:main:feishu:direct:ou_fresh');
+
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  test('does not overwrite remembered external routes with an internal main fallback', async () => {
+    readStoredNotificationRouteMock.mockResolvedValue({
+      sessionKey: 'agent:main:feishu:group:oc_saved',
+      agentId: 'main',
+      replyChannel: 'feishu',
+      replyTo: 'chat:oc_saved',
+      replyAccountId: 'default',
+      updatedAt: 1,
+    });
+
+    const run = jest.fn().mockResolvedValue({ runId: 'run-subagent-main' });
+    const notifier = new EigenFluxNotifier(
+      createApi({
+        runtime: {
+          subagent: { run },
+        } as OpenClawPluginApi['runtime'],
+      }),
+      createLogger(),
+      {
+        ...createConfig(),
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+        sessionKey: 'main',
+        agentId: 'main',
+        replyChannel: undefined,
+        replyTo: undefined,
+        replyAccountId: undefined,
+      }
+    );
+
+    await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
+
+    expect(writeStoredNotificationRouteMock).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionKey: 'agent:main:feishu:group:oc_saved' })
+    );
   });
 });

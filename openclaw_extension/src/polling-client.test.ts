@@ -1,6 +1,18 @@
-import { PLUGIN_CONFIG } from './config';
-import { EigenFluxPollingClient } from './polling-client';
+import {
+  EigenFluxPollingClient,
+  readPollIntervalSec,
+  DEFAULT_POLL_INTERVAL_SEC,
+  MIN_POLL_INTERVAL_SEC,
+  MAX_POLL_INTERVAL_SEC,
+} from './polling-client';
 import { Logger } from './logger';
+import type { CliResult } from './cli-executor';
+
+jest.mock('./cli-executor');
+
+import { execEigenflux } from './cli-executor';
+
+const execEigenfluxMock = execEigenflux as jest.MockedFunction<typeof execEigenflux>;
 
 function createLoggerSpies() {
   return {
@@ -26,61 +38,42 @@ function createDeferred<T>() {
 }
 
 describe('EigenFluxPollingClient', () => {
-  const originalFetch = global.fetch;
-
   afterEach(() => {
-    global.fetch = originalFetch;
     jest.restoreAllMocks();
   });
 
-  test('polls feed and forwards the full payload to callback', async () => {
+  test('polls feed via CLI and forwards the full payload to callback', async () => {
     const onFeedPolled = jest.fn().mockResolvedValue(undefined);
     const onAuthRequired = jest.fn().mockResolvedValue(undefined);
 
-    global.fetch = jest.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          code: 0,
-          msg: 'success',
-          data: {
-            items: [
-              {
-                item_id: 'item-101',
-                group_id: 'group-101',
-                summary: 'Important signal',
-                broadcast_type: 'info',
-                updated_at: 1760000000000,
-              },
-            ],
-            has_more: false,
-            notifications: [
-              {
-                notification_id: 'notif-1',
-                type: 'system',
-                content: 'Feed refreshed successfully',
-                created_at: 1760000000100,
-              },
-            ],
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'success',
+      data: {
+        items: [
+          {
+            item_id: 'item-101',
+            group_id: 'group-101',
+            summary: 'Important signal',
+            broadcast_type: 'info',
+            updated_at: 1760000000000,
           },
-        }),
-        {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json',
+        ],
+        has_more: false,
+        notifications: [
+          {
+            notification_id: 'notif-1',
+            type: 'system',
+            content: 'Feed refreshed successfully',
+            created_at: 1760000000100,
           },
-        }
-      )
-    ) as typeof fetch;
+        ],
+      },
+    } as CliResult<any>);
 
     const client = new EigenFluxPollingClient({
-      apiUrl: 'http://127.0.0.1:8080',
-      getAuthState: () => ({
-        status: 'available',
-        accessToken: 'at_test_token',
-        source: 'file',
-        credentialsPath: '/tmp/eigenflux/credentials.json',
-      }),
-      pollIntervalSec: 60,
+      serverName: 'eigenflux',
+      eigenfluxBin: 'eigenflux',
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
       logger: createLogger(),
       onFeedPolled,
       onAuthRequired,
@@ -96,6 +89,7 @@ describe('EigenFluxPollingClient', () => {
     expect(onFeedPolled).toHaveBeenCalledWith(
       expect.objectContaining({
         code: 0,
+        msg: 'success',
         data: expect.objectContaining({
           items: [
             expect.objectContaining({
@@ -112,157 +106,60 @@ describe('EigenFluxPollingClient', () => {
       })
     );
     expect(onAuthRequired).not.toHaveBeenCalled();
-  });
 
-  test('emits auth-required callback when token is missing', async () => {
-    const onFeedPolled = jest.fn().mockResolvedValue(undefined);
-    const onAuthRequired = jest.fn().mockResolvedValue(undefined);
-
-    const client = new EigenFluxPollingClient({
-      apiUrl: 'http://127.0.0.1:8080',
-      getAuthState: () => ({
-        status: 'missing',
-        credentialsPath: '/tmp/eigenflux/credentials.json',
-      }),
-      pollIntervalSec: 60,
-      logger: createLogger(),
-      onFeedPolled,
-      onAuthRequired,
-    });
-
-    const result = await client.pollOnce();
-
-    expect(result).toEqual({
-      kind: 'auth_required',
-      authEvent: {
-        reason: 'missing_token',
-        credentialsPath: '/tmp/eigenflux/credentials.json',
-        source: undefined,
-        expiresAt: undefined,
-      },
-    });
-    expect(onAuthRequired).toHaveBeenCalledWith({
-      reason: 'missing_token',
-      credentialsPath: '/tmp/eigenflux/credentials.json',
-      source: undefined,
-      expiresAt: undefined,
-    });
-    expect(onFeedPolled).not.toHaveBeenCalled();
-    expect(global.fetch).toBe(originalFetch);
-  });
-
-  test('emits auth-required callback when feed returns 401', async () => {
-    const onFeedPolled = jest.fn().mockResolvedValue(undefined);
-    const onAuthRequired = jest.fn().mockResolvedValue(undefined);
-
-    global.fetch = jest.fn().mockResolvedValue(
-      new Response('', {
-        status: 401,
-        statusText: 'Unauthorized',
-      })
-    ) as typeof fetch;
-
-    const client = new EigenFluxPollingClient({
-      apiUrl: 'http://127.0.0.1:8080',
-      getAuthState: () => ({
-        status: 'available',
-        accessToken: 'at_test_token',
-        source: 'file',
-        credentialsPath: '/tmp/eigenflux/credentials.json',
-      }),
-      pollIntervalSec: 60,
-      logger: createLogger(),
-      onFeedPolled,
-      onAuthRequired,
-    });
-
-    const result = await client.pollOnce();
-
-    expect(result).toEqual({
-      kind: 'auth_required',
-      authEvent: {
-        reason: 'unauthorized',
-        credentialsPath: '/tmp/eigenflux/credentials.json',
-        source: 'file',
-        expiresAt: undefined,
-        statusCode: 401,
-      },
-    });
-    expect(onAuthRequired).toHaveBeenCalledWith({
-      reason: 'unauthorized',
-      credentialsPath: '/tmp/eigenflux/credentials.json',
-      source: 'file',
-      expiresAt: undefined,
-      statusCode: 401,
-    });
-    expect(onFeedPolled).not.toHaveBeenCalled();
-  });
-
-  test('sends plugin metadata headers on feed requests', async () => {
-    const onFeedPolled = jest.fn().mockResolvedValue(undefined);
-    const onAuthRequired = jest.fn().mockResolvedValue(undefined);
-
-    global.fetch = jest.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          code: 0,
-          msg: 'success',
-          data: { items: [], has_more: false, notifications: [] },
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      )
-    ) as typeof fetch;
-
-    const client = new EigenFluxPollingClient({
-      apiUrl: 'http://127.0.0.1:8080',
-      getAuthState: () => ({
-        status: 'available',
-        accessToken: 'at_test_token',
-        source: 'file',
-        credentialsPath: '/tmp/eigenflux/credentials.json',
-      }),
-      pollIntervalSec: 60,
-      logger: createLogger(),
-      onFeedPolled,
-      onAuthRequired,
-    });
-
-    await client.pollOnce();
-
-    const fetchCall = (global.fetch as jest.Mock).mock.calls[0];
-    const headers = fetchCall[1].headers;
-    expect(headers['User-Agent']).toContain('node/');
-    expect(headers['User-Agent']).not.toContain('eigenflux-plugin');
-    expect(headers['X-Plugin-Ver']).toBe(PLUGIN_CONFIG.PLUGIN_VERSION);
-    expect(headers['X-Host-Kind']).toBe(PLUGIN_CONFIG.HOST_KIND);
-  });
-
-  test('logs detailed fetch failure diagnostics', async () => {
-    const loggerSpies = createLoggerSpies();
-    const networkCause = Object.assign(
-      new Error('connect ECONNREFUSED 127.0.0.1:8080'),
-      {
-        code: 'ECONNREFUSED',
-        errno: -61,
-        syscall: 'connect',
-        address: '127.0.0.1',
-        port: 8080,
-      }
+    expect(execEigenfluxMock).toHaveBeenCalledWith(
+      'eigenflux',
+      ['feed', 'poll', '--limit', '20', '--action', 'refresh', '-s', 'eigenflux', '-f', 'json'],
+      expect.objectContaining({ logger: expect.any(Logger) })
     );
+  });
 
-    global.fetch = jest.fn().mockRejectedValue(
-      Object.assign(new TypeError('fetch failed'), { cause: networkCause })
-    ) as typeof fetch;
+  test('emits auth-required callback when CLI returns auth_required', async () => {
+    const onFeedPolled = jest.fn().mockResolvedValue(undefined);
+    const onAuthRequired = jest.fn().mockResolvedValue(undefined);
+
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'auth_required',
+      stderr: 'token expired',
+    } as CliResult<any>);
 
     const client = new EigenFluxPollingClient({
-      apiUrl: 'http://127.0.0.1:8080',
-      getAuthState: () => ({
-        status: 'available',
-        accessToken: 'at_test_token',
-        source: 'file',
-        credentialsPath: '/tmp/eigenflux/credentials.json',
-      }),
-      pollIntervalSec: 60,
+      serverName: 'eigenflux',
+      eigenfluxBin: 'eigenflux',
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
+      logger: createLogger(),
+      onFeedPolled,
+      onAuthRequired,
+    });
+
+    const result = await client.pollOnce();
+
+    expect(result).toEqual({
+      kind: 'auth_required',
+      authEvent: {
+        reason: 'auth_required',
+      },
+    });
+    expect(onAuthRequired).toHaveBeenCalledWith({
+      reason: 'auth_required',
+    });
+    expect(onFeedPolled).not.toHaveBeenCalled();
+  });
+
+  test('returns error result when CLI command fails', async () => {
+    const loggerSpies = createLoggerSpies();
+
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'error',
+      error: new Error('connect ECONNREFUSED 127.0.0.1:8080'),
+      exitCode: 1,
+      stderr: 'connection failed',
+    } as CliResult<any>);
+
+    const client = new EigenFluxPollingClient({
+      serverName: 'eigenflux',
+      eigenfluxBin: 'eigenflux',
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
       logger: createLogger(loggerSpies),
       onFeedPolled: jest.fn().mockResolvedValue(undefined),
       onAuthRequired: jest.fn().mockResolvedValue(undefined),
@@ -271,40 +168,18 @@ describe('EigenFluxPollingClient', () => {
     const result = await client.pollOnce();
 
     expect(result.kind).toBe('error');
-    expect(loggerSpies.error).toHaveBeenCalledWith(
-      expect.stringContaining(
-        '[EigenFlux] Failed to poll feed (url=http://127.0.0.1:8080/api/v1/items/feed?action=refresh&limit=20): TypeError: fetch failed'
-      )
-    );
-    expect(loggerSpies.error).toHaveBeenCalledWith(
-      expect.stringContaining('cause=Error: connect ECONNREFUSED 127.0.0.1:8080')
-    );
-    expect(loggerSpies.error).toHaveBeenCalledWith(
-      expect.stringContaining('code=ECONNREFUSED')
-    );
-    expect(loggerSpies.error).toHaveBeenCalledWith(
-      expect.stringContaining('address=127.0.0.1')
-    );
-    expect(loggerSpies.error).toHaveBeenCalledWith(
-      expect.stringContaining('port=8080')
-    );
   });
 
   test('does not re-enter feed polling while a previous poll is still running', async () => {
     const loggerSpies = createLoggerSpies();
-    const responseDeferred = createDeferred<Response>();
+    const cliDeferred = createDeferred<CliResult<any>>();
 
-    global.fetch = jest.fn().mockReturnValue(responseDeferred.promise) as typeof fetch;
+    execEigenfluxMock.mockReturnValue(cliDeferred.promise);
 
     const client = new EigenFluxPollingClient({
-      apiUrl: 'http://127.0.0.1:8080',
-      getAuthState: () => ({
-        status: 'available',
-        accessToken: 'at_test_token',
-        source: 'file',
-        credentialsPath: '/tmp/eigenflux/credentials.json',
-      }),
-      pollIntervalSec: 60,
+      serverName: 'eigenflux',
+      eigenfluxBin: 'eigenflux',
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
       logger: createLogger(loggerSpies),
       onFeedPolled: jest.fn().mockResolvedValue(undefined),
       onAuthRequired: jest.fn().mockResolvedValue(undefined),
@@ -313,26 +188,154 @@ describe('EigenFluxPollingClient', () => {
     const firstPoll = client.pollOnce();
     const secondPoll = client.pollOnce();
 
-    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(execEigenfluxMock).toHaveBeenCalledTimes(1);
     expect(loggerSpies.warn).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[EigenFlux] Skipping feed poll because a previous poll is still in progress'
+        'Skipping feed poll because a previous poll is still in progress'
       )
     );
 
-    responseDeferred.resolve(
-      new Response(
-        JSON.stringify({
-          code: 0,
-          msg: 'success',
-          data: { items: [], has_more: false, notifications: [] },
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      )
-    );
+    cliDeferred.resolve({
+      kind: 'success',
+      data: { items: [], has_more: false, notifications: [] },
+    } as CliResult<any>);
 
     const [firstResult, secondResult] = await Promise.all([firstPoll, secondPoll]);
     expect(firstResult).toEqual(secondResult);
     expect(firstResult.kind).toBe('success');
+  });
+
+  test('does not notify feed callback when items and notifications are empty', async () => {
+    const onFeedPolled = jest.fn().mockResolvedValue(undefined);
+
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'success',
+      data: { items: [], has_more: false, notifications: [] },
+    } as CliResult<any>);
+
+    const client = new EigenFluxPollingClient({
+      serverName: 'eigenflux',
+      eigenfluxBin: 'eigenflux',
+      resolvePollIntervalSec: jest.fn().mockResolvedValue(60),
+      logger: createLogger(),
+      onFeedPolled,
+      onAuthRequired: jest.fn().mockResolvedValue(undefined),
+    });
+
+    const result = await client.pollOnce();
+
+    expect(result.kind).toBe('success');
+    expect(onFeedPolled).not.toHaveBeenCalled();
+  });
+
+  test('re-resolves pollInterval after every poll and reschedules with the new value', async () => {
+    jest.useFakeTimers();
+    try {
+      execEigenfluxMock.mockResolvedValue({
+        kind: 'success',
+        data: { items: [], has_more: false, notifications: [] },
+      } as CliResult<any>);
+
+      const resolvePollIntervalSec = jest
+        .fn<Promise<number>, []>()
+        .mockResolvedValueOnce(30)
+        .mockResolvedValueOnce(90);
+
+      const client = new EigenFluxPollingClient({
+        serverName: 'eigenflux',
+        eigenfluxBin: 'eigenflux',
+        resolvePollIntervalSec,
+        logger: createLogger(),
+        onFeedPolled: jest.fn().mockResolvedValue(undefined),
+        onAuthRequired: jest.fn().mockResolvedValue(undefined),
+      });
+
+      await client.start();
+      // Initial poll + first scheduleNext should have consulted the resolver once.
+      expect(resolvePollIntervalSec).toHaveBeenCalledTimes(1);
+      expect(execEigenfluxMock).toHaveBeenCalledTimes(1);
+
+      // Fire the first scheduled timer → triggers second poll, then resolver again.
+      await jest.advanceTimersByTimeAsync(30_000);
+      // flush pending microtasks after setTimeout callback so scheduleNext() runs
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(execEigenfluxMock).toHaveBeenCalledTimes(2);
+      expect(resolvePollIntervalSec).toHaveBeenCalledTimes(2);
+
+      client.stop();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('readPollIntervalSec', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test('returns numeric value from CLI when within range', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: 120 } as CliResult<any>);
+
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(120);
+    expect(execEigenfluxMock).toHaveBeenCalledWith(
+      'eigenflux',
+      ['config', 'get', '--key', 'feed_poll_interval', '--server', 'eigenflux', '--format', 'json'],
+      expect.any(Object)
+    );
+  });
+
+  test('parses numeric string values from CLI', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: '45' } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(45);
+  });
+
+  test('falls back to default when CLI returns no value', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: undefined } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
+  });
+
+  test('falls back to default when CLI errors out', async () => {
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'error',
+      error: new Error('boom'),
+      exitCode: 1,
+      stderr: '',
+    } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
+  });
+
+  test('falls back to default when value is below minimum', async () => {
+    const spies = createLoggerSpies();
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'success',
+      data: MIN_POLL_INTERVAL_SEC - 1,
+    } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger(spies));
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
+    expect(spies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('outside')
+    );
+  });
+
+  test('falls back to default when value is above maximum', async () => {
+    execEigenfluxMock.mockResolvedValue({
+      kind: 'success',
+      data: MAX_POLL_INTERVAL_SEC + 1,
+    } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
+  });
+
+  test('falls back to default when value is non-numeric', async () => {
+    execEigenfluxMock.mockResolvedValue({ kind: 'success', data: 'not-a-number' } as CliResult<any>);
+    const interval = await readPollIntervalSec('eigenflux', 'eigenflux', createLogger());
+    expect(interval).toBe(DEFAULT_POLL_INTERVAL_SEC);
   });
 });
