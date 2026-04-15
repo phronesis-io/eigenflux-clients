@@ -79,7 +79,7 @@ type ServerRuntimeSelection = {
   error?: string;
 };
 
-const COMMAND_NAMES = ['auth', 'profile', 'servers', 'feed', 'pm', 'here'] as const;
+const COMMAND_NAMES = ['auth', 'profile', 'servers', 'feed', 'pm', 'here', 'version'] as const;
 const COMMAND_NAME_SET = new Set<string>(COMMAND_NAMES);
 
 const DEFAULT_ROUTING: RoutingConfig = {
@@ -151,7 +151,16 @@ function register(api: OpenClawPluginApi): void {
     },
   });
 
-  registerCommand(api, logger, pluginConfig, eigenfluxHome, () => runtimes);
+  registerCommand(
+    api,
+    logger,
+    pluginConfig,
+    eigenfluxHome,
+    () => runtimes,
+    (next) => {
+      runtimes = next;
+    }
+  );
 }
 
 function resolvePluginLogger(api: OpenClawPluginApi): unknown {
@@ -303,20 +312,46 @@ function registerCommand(
   logger: Logger,
   pluginConfig: ResolvedEigenFluxPluginConfig,
   eigenfluxHome: string,
-  getRuntimes: () => ServerRuntime[]
+  getRuntimes: () => ServerRuntime[],
+  setRuntimes: (runtimes: ServerRuntime[]) => void
 ): void {
   if (!api.registerCommand) {
     logger.warn('registerCommand API unavailable; skipping /eigenflux command registration');
     return;
   }
 
+  const ensureRuntimes = async (): Promise<ServerRuntime[]> => {
+    const existing = getRuntimes();
+    if (existing.length > 0) {
+      return existing;
+    }
+
+    const discovery = await discoverServers(pluginConfig.eigenfluxBin, logger);
+    if (discovery.kind === 'not_installed' || discovery.servers.length === 0) {
+      return existing;
+    }
+
+    const created = discovery.servers.map((server) =>
+      createServerRuntime(api, logger, pluginConfig, server, eigenfluxHome)
+    );
+    setRuntimes(created);
+    return created;
+  };
+
   api.registerCommand({
     name: 'eigenflux',
-    description: 'EigenFlux plugin commands: auth, profile, servers, feed, pm, here',
+    description: 'EigenFlux plugin commands: auth, profile, servers, feed, pm, here, version',
     acceptsArgs: true,
     handler: async (ctx) => {
       const parsed = parseCommandArgs(ctx.args);
-      const runtimes = getRuntimes();
+
+      if (parsed.command === 'version') {
+        return {
+          text: await buildVersionText(pluginConfig.eigenfluxBin),
+        };
+      }
+
+      const runtimes = await ensureRuntimes();
 
       if (parsed.command === 'servers') {
         return {
@@ -455,6 +490,7 @@ function buildHelpText(runtimes: ServerRuntime[]): string {
     '/eigenflux feed — Run one feed refresh',
     '/eigenflux pm — Show PM stream status',
     '/eigenflux here — Remember current conversation as delivery route',
+    '/eigenflux version — Show eigenflux CLI version info',
   ]
     .filter(Boolean)
     .join('\n');
@@ -640,6 +676,24 @@ async function buildFeedText(runtime: ServerRuntime): Promise<string> {
     default:
       return `EigenFlux feed finished with an unknown result for server ${runtime.server.name}.`;
   }
+}
+
+async function buildVersionText(eigenfluxBin: string): Promise<string> {
+  const result = await execEigenflux<unknown>(eigenfluxBin, ['version']);
+
+  if (result.kind === 'not_installed') {
+    return `EigenFlux CLI not installed (bin=${result.bin}). Install with: ${INSTALL_COMMAND}`;
+  }
+  if (result.kind === 'auth_required') {
+    return `EigenFlux CLI reported auth_required while fetching version (stderr: ${result.stderr || 'n/a'}).`;
+  }
+  if (result.kind === 'error') {
+    return `Failed to fetch eigenflux version: ${result.error.message}`;
+  }
+
+  const body =
+    typeof result.data === 'string' ? result.data : safeJsonStringify(result.data);
+  return ['EigenFlux CLI version:', '```json', body, '```'].join('\n');
 }
 
 function buildPmStatusText(runtime: ServerRuntime): string {
