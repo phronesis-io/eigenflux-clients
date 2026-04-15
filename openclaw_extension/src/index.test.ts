@@ -570,4 +570,141 @@ describe('register unit', () => {
 
     await services[0].stop();
   });
+
+  test('/eigenflux version invokes CLI version and prints the payload', async () => {
+    execEigenfluxMock.mockImplementation(async (_bin: string, args: string[]) => {
+      if (args[0] === 'version') {
+        return {
+          kind: 'success',
+          data: { cli_version: '1.2.3', os: 'darwin', arch: 'arm64' },
+        };
+      }
+      return { kind: 'success', data: undefined };
+    });
+
+    const { default: plugin } = await import('./index');
+    const commands: any[] = [];
+
+    plugin.register({
+      config: {},
+      pluginConfig: {},
+      runtime: {},
+      logger: createLogger(),
+      registerService: jest.fn(),
+      registerCommand: (command: any) => commands.push(command),
+      registerHook: jest.fn(),
+      on: jest.fn(),
+    } as any);
+
+    const resp = await commands[0].handler({ args: 'version' });
+    expect(resp.text).toContain('EigenFlux CLI version:');
+    expect(resp.text).toContain('"cli_version": "1.2.3"');
+    const versionCall = execEigenfluxMock.mock.calls.find(
+      ([, args]: any[]) => Array.isArray(args) && args[0] === 'version'
+    );
+    expect(versionCall).toBeDefined();
+  });
+
+  test('lazy discovery returns install instructions when CLI is not installed', async () => {
+    discoverServersMock.mockResolvedValue({ kind: 'not_installed', bin: 'eigenflux' });
+
+    const { default: plugin } = await import('./index');
+    const commands: any[] = [];
+
+    plugin.register({
+      config: {},
+      pluginConfig: {},
+      runtime: {},
+      logger: createLogger(),
+      registerService: jest.fn(),
+      registerCommand: (command: any) => commands.push(command),
+      registerHook: jest.fn(),
+      on: jest.fn(),
+    } as any);
+
+    const resp = await commands[0].handler({ args: 'auth' });
+    expect(resp.text).toContain('EigenFlux CLI not installed');
+    expect(resp.text).toContain('curl -fsSL https://eigenflux.ai/install.sh | bash');
+  });
+
+  test('concurrent commands share a single lazy discovery call', async () => {
+    const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
+    fs.mkdirSync(serverDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(serverDir, 'credentials.json'),
+      JSON.stringify({ access_token: 'at_concurrent' }),
+      'utf-8'
+    );
+
+    let resolveDiscovery: ((value: any) => void) | null = null;
+    discoverServersMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDiscovery = resolve;
+        })
+    );
+
+    const { default: plugin } = await import('./index');
+    const commands: any[] = [];
+
+    plugin.register({
+      config: {},
+      pluginConfig: {},
+      runtime: {},
+      logger: createLogger(),
+      registerService: jest.fn(),
+      registerCommand: (command: any) => commands.push(command),
+      registerHook: jest.fn(),
+      on: jest.fn(),
+    } as any);
+
+    const first = commands[0].handler({ args: 'auth' });
+    const second = commands[0].handler({ args: 'auth' });
+    const third = commands[0].handler({ args: 'servers' });
+
+    // Wait a tick so both handlers enter ensureRuntimes before discovery resolves.
+    await new Promise((r) => setImmediate(r));
+
+    resolveDiscovery!({
+      kind: 'ok',
+      servers: [{ name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true }],
+    });
+
+    await Promise.all([first, second, third]);
+    expect(discoverServersMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('commands rediscover servers when the discovery service has not populated runtimes', async () => {
+    const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
+    fs.mkdirSync(serverDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(serverDir, 'credentials.json'),
+      JSON.stringify({ access_token: 'at_lazy_token' }),
+      'utf-8'
+    );
+
+    discoverServersMock.mockResolvedValue({
+      kind: 'ok',
+      servers: [{ name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true }],
+    });
+
+    const { default: plugin } = await import('./index');
+    const commands: any[] = [];
+
+    plugin.register({
+      config: {},
+      pluginConfig: {},
+      runtime: {},
+      logger: createLogger(),
+      registerService: jest.fn(),
+      registerCommand: (command: any) => commands.push(command),
+      registerHook: jest.fn(),
+      on: jest.fn(),
+    } as any);
+
+    // Note: discovery service is NOT started — runtimes start empty.
+    const authResp = await commands[0].handler({ args: 'auth' });
+    expect(authResp.text).toContain('EigenFlux auth status (server=eigenflux):');
+    expect(authResp.text).toContain('status: available');
+  });
 });

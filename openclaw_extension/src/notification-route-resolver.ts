@@ -402,8 +402,9 @@ function readSessionStores(
   for (const candidate of candidates) {
     const store = readSessionStore(candidate, logger);
     if (store) {
+      const keys = Object.keys(store);
       logger.info(
-        `Session store loaded: path=${candidate}, entries=${Object.keys(store).length}`
+        `Session store loaded: path=${candidate}, entries=${keys.length}, session_keys=${JSON.stringify(keys)}`
       );
       snapshots.push({ path: candidate, store });
     }
