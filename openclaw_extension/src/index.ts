@@ -320,22 +320,39 @@ function registerCommand(
     return;
   }
 
-  const ensureRuntimes = async (): Promise<ServerRuntime[]> => {
-    const existing = getRuntimes();
-    if (existing.length > 0) {
-      return existing;
-    }
+  type EnsureRuntimesResult = {
+    runtimes: ServerRuntime[];
+    notInstalledBin?: string;
+  };
 
+  let inflightDiscovery: Promise<EnsureRuntimesResult> | null = null;
+
+  const runDiscovery = async (): Promise<EnsureRuntimesResult> => {
     const discovery = await discoverServers(pluginConfig.eigenfluxBin, logger);
-    if (discovery.kind === 'not_installed' || discovery.servers.length === 0) {
-      return existing;
+    if (discovery.kind === 'not_installed') {
+      return { runtimes: getRuntimes(), notInstalledBin: discovery.bin };
     }
-
+    if (discovery.servers.length === 0) {
+      return { runtimes: getRuntimes() };
+    }
     const created = discovery.servers.map((server) =>
       createServerRuntime(api, logger, pluginConfig, server, eigenfluxHome)
     );
     setRuntimes(created);
-    return created;
+    return { runtimes: created };
+  };
+
+  const ensureRuntimes = async (): Promise<EnsureRuntimesResult> => {
+    const existing = getRuntimes();
+    if (existing.length > 0) {
+      return { runtimes: existing };
+    }
+    if (!inflightDiscovery) {
+      inflightDiscovery = runDiscovery().finally(() => {
+        inflightDiscovery = null;
+      });
+    }
+    return inflightDiscovery;
   };
 
   api.registerCommand({
@@ -351,7 +368,13 @@ function registerCommand(
         };
       }
 
-      const runtimes = await ensureRuntimes();
+      const { runtimes, notInstalledBin } = await ensureRuntimes();
+
+      if (notInstalledBin && runtimes.length === 0) {
+        return {
+          text: `EigenFlux CLI not installed (bin=${notInstalledBin}). Install with: ${INSTALL_COMMAND}`,
+        };
+      }
 
       if (parsed.command === 'servers') {
         return {

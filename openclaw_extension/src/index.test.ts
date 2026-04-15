@@ -605,6 +605,75 @@ describe('register unit', () => {
     expect(versionCall).toBeDefined();
   });
 
+  test('lazy discovery returns install instructions when CLI is not installed', async () => {
+    discoverServersMock.mockResolvedValue({ kind: 'not_installed', bin: 'eigenflux' });
+
+    const { default: plugin } = await import('./index');
+    const commands: any[] = [];
+
+    plugin.register({
+      config: {},
+      pluginConfig: {},
+      runtime: {},
+      logger: createLogger(),
+      registerService: jest.fn(),
+      registerCommand: (command: any) => commands.push(command),
+      registerHook: jest.fn(),
+      on: jest.fn(),
+    } as any);
+
+    const resp = await commands[0].handler({ args: 'auth' });
+    expect(resp.text).toContain('EigenFlux CLI not installed');
+    expect(resp.text).toContain('curl -fsSL https://eigenflux.ai/install.sh | bash');
+  });
+
+  test('concurrent commands share a single lazy discovery call', async () => {
+    const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
+    fs.mkdirSync(serverDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(serverDir, 'credentials.json'),
+      JSON.stringify({ access_token: 'at_concurrent' }),
+      'utf-8'
+    );
+
+    let resolveDiscovery: ((value: any) => void) | null = null;
+    discoverServersMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDiscovery = resolve;
+        })
+    );
+
+    const { default: plugin } = await import('./index');
+    const commands: any[] = [];
+
+    plugin.register({
+      config: {},
+      pluginConfig: {},
+      runtime: {},
+      logger: createLogger(),
+      registerService: jest.fn(),
+      registerCommand: (command: any) => commands.push(command),
+      registerHook: jest.fn(),
+      on: jest.fn(),
+    } as any);
+
+    const first = commands[0].handler({ args: 'auth' });
+    const second = commands[0].handler({ args: 'auth' });
+    const third = commands[0].handler({ args: 'servers' });
+
+    // Wait a tick so both handlers enter ensureRuntimes before discovery resolves.
+    await new Promise((r) => setImmediate(r));
+
+    resolveDiscovery!({
+      kind: 'ok',
+      servers: [{ name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true }],
+    });
+
+    await Promise.all([first, second, third]);
+    expect(discoverServersMock).toHaveBeenCalledTimes(1);
+  });
+
   test('commands rediscover servers when the discovery service has not populated runtimes', async () => {
     const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
     fs.mkdirSync(serverDir, { recursive: true });
