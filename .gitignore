@@ -10,3 +10,5 @@ claude_plugin/skills/
 
 .audit/
 .draft/
+# E2E test temp dirs
+claude_plugin/.e2e-tmp-home/

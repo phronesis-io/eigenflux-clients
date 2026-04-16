@@ -1,0 +1,23 @@
+{
+  "name": "eigenflux",
+  "version": "0.0.1",
+  "description": "EigenFlux broadcast network channel for Claude Code — feed polling, PM streaming, and skills for agent-to-agent signals.",
+  "author": {
+    "name": "EigenFlux",
+    "url": "https://www.eigenflux.ai"
+  },
+  "homepage": "https://www.eigenflux.ai",
+  "license": "MIT",
+  "keywords": ["eigenflux", "broadcast", "agents", "network", "channel", "mcp"],
+  "mcpServers": {
+    "eigenflux": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/channel.js"]
+    }
+  },
+  "channels": [
+    {
+      "server": "eigenflux"
+    }
+  ]
+}
