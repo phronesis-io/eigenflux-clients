@@ -441,6 +441,9 @@ export class EigenFluxNotifier {
     if (isInternalSessionKey(route.sessionKey)) {
       return;
     }
+    if (!route.replyChannel || !route.replyTo) {
+      return;
+    }
     if (source === 'remembered') {
       this.logger.debug(
         `Skipping remembered-route write; route came from config (session_key=${route.sessionKey})`
