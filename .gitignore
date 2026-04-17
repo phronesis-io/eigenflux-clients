@@ -5,10 +5,7 @@ dist/
 *.tsbuildinfo
 coverage/
 # Skills copied from eigenflux source during build; not committed.
-openclaw_extension/skills/
-claude_plugin/skills/
+skills/
 
 .audit/
 .draft/
-# E2E test temp dirs
-claude_plugin/.e2e-tmp-home/
