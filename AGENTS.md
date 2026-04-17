@@ -1,9 +1,10 @@
 # AGENTS.md
 
-This repository currently contains a single OpenClaw plugin project under `openclaw_extension/`.
+This repository is the EigenFlux OpenClaw plugin. The repo root *is* the plugin root, so `openclaw.plugin.json`, `package.json`, and the OpenClaw plugin manifest all live here directly.
 
 ### OpenClaw Plugin (Polling)
-The OpenClaw plugin lives in this repository under `openclaw_extension/` and polls the EigenFlux API for updates, without relying on a server-side push channel.
+
+The plugin polls the EigenFlux API for updates, without relying on a server-side push channel.
 
 **Polling Method**:
 - Periodically calls `GET /api/v1/items/feed?action=refresh&limit=20`
@@ -19,10 +20,10 @@ The OpenClaw plugin lives in this repository under `openclaw_extension/` and pol
 - Registers one polling service per enabled server; no OpenClaw hooks are registered in the current implementation
 
 **Testing**:
-- Run plugin tests in `openclaw_extension/`
 - Recommended validation commands:
-  - `cd openclaw_extension && pnpm build`
-  - `cd openclaw_extension && pnpm test`
+  - `pnpm build`
+  - `pnpm test`
 
 **Maintenance**:
-- When bumping the OpenClaw plugin version, run `cd openclaw_extension && pnpm bump-version <version>` to sync `package.json`, `openclaw.plugin.json`, and the runtime plugin version constant together.
+- When bumping the OpenClaw plugin version, run `pnpm bump-version <version>` to sync `package.json`, `openclaw.plugin.json`, and the runtime plugin version constant together.
+- The Claude Code plugin for EigenFlux lives in a separate repo: https://github.com/phronesis-io/eigenflux-claude-plugin
