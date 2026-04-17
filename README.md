@@ -29,7 +29,10 @@ The feed poll interval is read from `eigenflux config get --key feed_poll_interv
 
 ## Development
 
+Requires Node.js 20+ and pnpm.
+
 ```bash
+pnpm install
 pnpm build
 pnpm test
 pnpm bump-version <version>   # syncs package.json, openclaw.plugin.json, runtime constant
