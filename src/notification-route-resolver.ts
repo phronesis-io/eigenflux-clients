@@ -141,7 +141,7 @@ export function isDirectSessionKey(sessionKey: string, entry: SessionStoreEntry)
   }
 
   const chatType =
-    readNonEmptyString((entry as { chatType?: unknown }).chatType)?.toLowerCase() ??
+    readNonEmptyString(entry.chatType)?.toLowerCase() ??
     readNonEmptyString(entry.origin?.chatType as unknown)?.toLowerCase();
   if (chatType === 'direct' || chatType === 'dm') {
     return true;
@@ -189,7 +189,7 @@ export function isGroupEntry(sessionKey: string, entry: SessionStoreEntry): bool
   }
 
   if (
-    readChatTypeSignal((entry as { chatType?: unknown }).chatType) ||
+    readChatTypeSignal(entry.chatType) ||
     readChatTypeSignal(entry.origin?.chatType as unknown)
   ) {
     return true;
@@ -559,7 +559,8 @@ type RouteCandidate = {
 function selectBestRoute(
   snapshots: SessionStoreSnapshot[],
   preferred: PreferredRoute | undefined,
-  preferredAgentId?: string
+  preferredAgentId?: string,
+  logger?: Logger
 ): RouteSelection | undefined {
   const candidates: RouteCandidate[] = [];
   const autoScan = preferred === undefined;
@@ -571,9 +572,11 @@ function selectBestRoute(
         continue;
       }
       if (isInternalSessionKey(sessionKey)) {
+        logger?.debug(`Skipping ${sessionKey}: internal session`);
         continue;
       }
       if (autoScan && isGroupEntry(sessionKey, entry)) {
+        logger?.debug(`Skipping ${sessionKey}: group entry in auto-scan`);
         continue;
       }
 
@@ -634,7 +637,7 @@ export function findSessionRouteForBinding(
   }
 
   const snapshots = readSessionStores(options.sessionStorePath, agentId, logger);
-  const best = selectBestRoute(snapshots, { channel, to, accountId }, agentId);
+  const best = selectBestRoute(snapshots, { channel, to, accountId }, agentId, logger);
   if (best) {
     return best.route;
   }
@@ -726,7 +729,8 @@ export async function resolveNotificationRoute(
           to: configRoute.replyTo,
           accountId: configRoute.replyAccountId,
         },
-        undefined
+        undefined,
+        logger
       )?.route;
     }
     const resolved = enriched
@@ -762,7 +766,7 @@ export async function resolveNotificationRoute(
               accountId: remembered.replyAccountId,
             }
           : undefined;
-      const peerMatch = selectBestRoute(snapshots, preferred, undefined);
+      const peerMatch = selectBestRoute(snapshots, preferred, undefined, logger);
       if (peerMatch) {
         return { route: peerMatch.route, source: 'remembered' };
       }
@@ -785,7 +789,7 @@ export async function resolveNotificationRoute(
   }
 
   // 3. Scan recent conversation history.
-  const best = selectBestRoute(snapshots, undefined, undefined);
+  const best = selectBestRoute(snapshots, undefined, undefined, logger);
   if (best) {
     logger.info(
       `Route resolve from session store: session_key=${best.route.sessionKey}, agent_id=${best.route.agentId}, channel=${best.route.replyChannel ?? 'n/a'}, to=${best.route.replyTo ?? 'n/a'}, account=${best.route.replyAccountId ?? 'n/a'}, updated_at=${best.updatedAt}`
