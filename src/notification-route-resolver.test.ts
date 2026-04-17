@@ -320,7 +320,7 @@ describe('isInternalSessionKey', () => {
   });
 });
 
-import { isGroupEntry } from './notification-route-resolver';
+import { isGroupEntry, isDirectSessionKey } from './notification-route-resolver';
 
 describe('isGroupEntry', () => {
   test('sessionKey with :group: is a group', () => {
@@ -390,5 +390,49 @@ describe('isGroupEntry', () => {
 
   test('empty entry with plain DM-shaped key is NOT a group', () => {
     expect(isGroupEntry('agent:main:main', {})).toBe(false);
+  });
+});
+
+describe('isDirectSessionKey', () => {
+  test('sessionKey parts contain "direct"', () => {
+    expect(isDirectSessionKey('agent:main:feishu:direct:ou_1', {})).toBe(true);
+  });
+
+  test('sessionKey parts contain "dm"', () => {
+    expect(isDirectSessionKey('agent:main:discord:dm:user1', {})).toBe(true);
+  });
+
+  test('entry.chatType=direct marks key as direct even without "direct" in sessionKey', () => {
+    expect(
+      isDirectSessionKey('agent:main:main', { chatType: 'direct' } as any)
+    ).toBe(true);
+  });
+
+  test('entry.origin.chatType=direct is recognized', () => {
+    expect(
+      isDirectSessionKey('agent:main:main', { origin: { chatType: 'direct' } } as any)
+    ).toBe(true);
+  });
+
+  test('deliveryContext.to with user: prefix is direct', () => {
+    expect(
+      isDirectSessionKey('agent:main:main', {
+        deliveryContext: { to: 'user:ou_1' },
+      } as any)
+    ).toBe(true);
+  });
+
+  test('lastTo with user: prefix is direct', () => {
+    expect(
+      isDirectSessionKey('agent:main:main', { lastTo: 'user:ou_1' } as any)
+    ).toBe(true);
+  });
+
+  test('group key is not direct', () => {
+    expect(isDirectSessionKey('agent:main:feishu:group:oc_1', {})).toBe(false);
+  });
+
+  test('empty entry with plain key is not direct', () => {
+    expect(isDirectSessionKey('agent:main:main', {})).toBe(false);
   });
 });

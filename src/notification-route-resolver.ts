@@ -134,9 +134,31 @@ function isExternalChannel(channel: string | undefined): boolean {
   return Boolean(channel && !INTERNAL_CHANNELS.has(channel));
 }
 
-function isDirectSessionKey(sessionKey: string): boolean {
+export function isDirectSessionKey(sessionKey: string, entry: SessionStoreEntry): boolean {
   const parts = sessionKey.toLowerCase().split(':').filter(Boolean);
-  return parts.includes('direct') || parts.includes('dm');
+  if (parts.includes('direct') || parts.includes('dm')) {
+    return true;
+  }
+
+  const chatType =
+    readNonEmptyString((entry as { chatType?: unknown }).chatType)?.toLowerCase() ??
+    readNonEmptyString(entry.origin?.chatType as unknown)?.toLowerCase();
+  if (chatType === 'direct' || chatType === 'dm') {
+    return true;
+  }
+
+  const toCandidates = [entry.deliveryContext?.to, entry.lastTo, entry.origin?.to];
+  return toCandidates.some((candidate) => {
+    const trimmed = readNonEmptyString(candidate);
+    if (!trimmed) {
+      return false;
+    }
+    const colonAt = trimmed.indexOf(':');
+    if (colonAt <= 0) {
+      return false;
+    }
+    return trimmed.slice(0, colonAt).toLowerCase() === 'user';
+  });
 }
 
 const GROUP_PEER_SHAPES = new Set(['group', 'channel', 'room']);
@@ -556,7 +578,7 @@ function selectBestRoute(
         route,
         updatedAt: normalizeUpdatedAt(entry.updatedAt),
         isExternal: isExternalChannel(route.replyChannel),
-        isDirect: isDirectSessionKey(sessionKey),
+        isDirect: isDirectSessionKey(sessionKey, entry),
       });
     }
   }
