@@ -114,17 +114,18 @@ function isAnyRouteOverrideEnabled(overrides: NotificationRouteOverrides): boole
   return Object.values(overrides).some(Boolean);
 }
 
-function isInternalSessionKey(sessionKey: string): boolean {
+export function isInternalSessionKey(sessionKey: string): boolean {
   const trimmed = readNonEmptyString(sessionKey);
   if (!trimmed) {
     return true;
   }
-  if (trimmed === 'main') {
+  const lower = trimmed.toLowerCase();
+  if (lower === 'main' || lower === 'heartbeat') {
     return true;
   }
 
-  const parts = trimmed.split(':').filter((part) => part.length > 0);
-  return parts[0]?.toLowerCase() === 'agent' && parts[2]?.toLowerCase() === 'main';
+  const parts = lower.split(':').filter((part) => part.length > 0);
+  return parts[0] === 'agent' && parts[2] === 'heartbeat';
 }
 
 function isExternalChannel(channel: string | undefined): boolean {

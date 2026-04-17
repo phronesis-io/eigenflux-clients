@@ -9,7 +9,7 @@ jest.mock('./session-route-memory', () => ({
   writeStoredNotificationRoute: jest.fn(),
 }));
 
-import { resolveNotificationRoute } from './notification-route-resolver';
+import { isInternalSessionKey, resolveNotificationRoute } from './notification-route-resolver';
 
 function createLogger(): Logger {
   return new Logger({
@@ -286,5 +286,36 @@ describe('resolveNotificationRoute', () => {
     expect(route.source).toBe('session-store');
 
     fs.rmSync(workdir, { recursive: true, force: true });
+  });
+});
+
+describe('isInternalSessionKey', () => {
+  test('bare "main" is internal', () => {
+    expect(isInternalSessionKey('main')).toBe(true);
+  });
+
+  test('bare "heartbeat" is internal', () => {
+    expect(isInternalSessionKey('heartbeat')).toBe(true);
+  });
+
+  test('empty / whitespace is internal', () => {
+    expect(isInternalSessionKey('')).toBe(true);
+    expect(isInternalSessionKey('   ')).toBe(true);
+  });
+
+  test('agent:<id>:heartbeat is internal', () => {
+    expect(isInternalSessionKey('agent:main:heartbeat')).toBe(true);
+    expect(isInternalSessionKey('agent:mengtian:heartbeat')).toBe(true);
+  });
+
+  test('agent:<id>:main is NOT internal (legacy DM scope)', () => {
+    expect(isInternalSessionKey('agent:main:main')).toBe(false);
+    expect(isInternalSessionKey('agent:mengtian:main')).toBe(false);
+  });
+
+  test('channel-scoped keys are not internal', () => {
+    expect(isInternalSessionKey('agent:main:feishu:direct:ou_123')).toBe(false);
+    expect(isInternalSessionKey('agent:main:feishu:group:oc_456')).toBe(false);
+    expect(isInternalSessionKey('agent:main:discord:direct:user789')).toBe(false);
   });
 });
