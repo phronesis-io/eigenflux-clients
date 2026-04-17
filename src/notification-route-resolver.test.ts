@@ -9,7 +9,7 @@ jest.mock('./session-route-memory', () => ({
   writeStoredNotificationRoute: jest.fn(),
 }));
 
-import { resolveNotificationRoute } from './notification-route-resolver';
+import { isInternalSessionKey, resolveNotificationRoute } from './notification-route-resolver';
 
 function createLogger(): Logger {
   return new Logger({
@@ -286,5 +286,416 @@ describe('resolveNotificationRoute', () => {
     expect(route.source).toBe('session-store');
 
     fs.rmSync(workdir, { recursive: true, force: true });
+  });
+});
+
+describe('isInternalSessionKey', () => {
+  test('bare "main" is internal', () => {
+    expect(isInternalSessionKey('main')).toBe(true);
+  });
+
+  test('bare "heartbeat" is internal', () => {
+    expect(isInternalSessionKey('heartbeat')).toBe(true);
+  });
+
+  test('empty / whitespace is internal', () => {
+    expect(isInternalSessionKey('')).toBe(true);
+    expect(isInternalSessionKey('   ')).toBe(true);
+  });
+
+  test('agent:<id>:heartbeat is internal', () => {
+    expect(isInternalSessionKey('agent:main:heartbeat')).toBe(true);
+    expect(isInternalSessionKey('agent:mengtian:heartbeat')).toBe(true);
+  });
+
+  test('agent:<id>:main is NOT internal (legacy DM scope)', () => {
+    expect(isInternalSessionKey('agent:main:main')).toBe(false);
+    expect(isInternalSessionKey('agent:mengtian:main')).toBe(false);
+  });
+
+  test('channel-scoped keys are not internal', () => {
+    expect(isInternalSessionKey('agent:main:feishu:direct:ou_123')).toBe(false);
+    expect(isInternalSessionKey('agent:main:feishu:group:oc_456')).toBe(false);
+    expect(isInternalSessionKey('agent:main:discord:direct:user789')).toBe(false);
+  });
+});
+
+import { isGroupEntry, isDirectSessionKey } from './notification-route-resolver';
+
+describe('isGroupEntry', () => {
+  test('sessionKey with :group: is a group', () => {
+    expect(isGroupEntry('agent:main:feishu:group:oc_123', {})).toBe(true);
+  });
+
+  test('sessionKey with :channel: is a group', () => {
+    expect(isGroupEntry('agent:main:discord:channel:c_123', {})).toBe(true);
+  });
+
+  test('sessionKey with :room: is a group', () => {
+    expect(isGroupEntry('agent:main:matrix:room:r_123', {})).toBe(true);
+  });
+
+  test('entry.chatType=group overrides DM-shaped key', () => {
+    expect(
+      isGroupEntry('agent:main:main', {
+        deliveryContext: { channel: 'feishu', to: 'user:ou_1' },
+        chatType: 'group' as any,
+      } as any)
+    ).toBe(true);
+  });
+
+  test('entry.origin.chatType=group', () => {
+    expect(
+      isGroupEntry('agent:main:main', {
+        origin: { provider: 'feishu', chatType: 'group' as any },
+      } as any)
+    ).toBe(true);
+  });
+
+  test('deliveryContext.to with chat: prefix is a group', () => {
+    expect(
+      isGroupEntry('agent:main:main', {
+        deliveryContext: { channel: 'feishu', to: 'chat:oc_123' },
+      } as any)
+    ).toBe(true);
+  });
+
+  test('lastTo with channel: prefix is a group', () => {
+    expect(
+      isGroupEntry('agent:main:main', { lastTo: 'channel:c_123' } as any)
+    ).toBe(true);
+  });
+
+  test('origin.to with room: prefix is a group', () => {
+    expect(
+      isGroupEntry('agent:main:main', { origin: { to: 'room:r_123' } } as any)
+    ).toBe(true);
+  });
+
+  test('DM session is NOT a group', () => {
+    expect(
+      isGroupEntry('agent:main:main', {
+        deliveryContext: { channel: 'feishu', to: 'user:ou_1' },
+      } as any)
+    ).toBe(false);
+  });
+
+  test('channel-scoped DM is NOT a group', () => {
+    expect(
+      isGroupEntry('agent:main:feishu:direct:ou_1', {
+        deliveryContext: { channel: 'feishu', to: 'user:ou_1' },
+      } as any)
+    ).toBe(false);
+  });
+
+  test('empty entry with plain DM-shaped key is NOT a group', () => {
+    expect(isGroupEntry('agent:main:main', {})).toBe(false);
+  });
+});
+
+describe('isDirectSessionKey', () => {
+  test('sessionKey parts contain "direct"', () => {
+    expect(isDirectSessionKey('agent:main:feishu:direct:ou_1', {})).toBe(true);
+  });
+
+  test('sessionKey parts contain "dm"', () => {
+    expect(isDirectSessionKey('agent:main:discord:dm:user1', {})).toBe(true);
+  });
+
+  test('entry.chatType=direct marks key as direct even without "direct" in sessionKey', () => {
+    expect(
+      isDirectSessionKey('agent:main:main', { chatType: 'direct' } as any)
+    ).toBe(true);
+  });
+
+  test('entry.origin.chatType=direct is recognized', () => {
+    expect(
+      isDirectSessionKey('agent:main:main', { origin: { chatType: 'direct' } } as any)
+    ).toBe(true);
+  });
+
+  test('deliveryContext.to with user: prefix is direct', () => {
+    expect(
+      isDirectSessionKey('agent:main:main', {
+        deliveryContext: { to: 'user:ou_1' },
+      } as any)
+    ).toBe(true);
+  });
+
+  test('lastTo with user: prefix is direct', () => {
+    expect(
+      isDirectSessionKey('agent:main:main', { lastTo: 'user:ou_1' } as any)
+    ).toBe(true);
+  });
+
+  test('group key is not direct', () => {
+    expect(isDirectSessionKey('agent:main:feishu:group:oc_1', {})).toBe(false);
+  });
+
+  test('empty entry with plain key is not direct', () => {
+    expect(isDirectSessionKey('agent:main:main', {})).toBe(false);
+  });
+});
+
+describe('auto-scan group exclusion', () => {
+  function writeStore(entries: Record<string, unknown>): string {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-group-exclusion-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(sessionStorePath, JSON.stringify(entries), 'utf-8');
+    return sessionStorePath;
+  }
+
+  test('legacy agent:<id>:main DM wins over a more recent group', async () => {
+    const sessionStorePath = writeStore({
+      'agent:main:main': {
+        updatedAt: 1000,
+        chatType: 'direct',
+        deliveryContext: {
+          channel: 'feishu',
+          to: 'user:ou_dm',
+          accountId: 'default',
+        },
+        origin: { provider: 'feishu', chatType: 'direct' },
+        lastTo: 'user:ou_dm',
+      },
+      'agent:main:feishu:group:oc_group': {
+        updatedAt: 9999,
+        chatType: 'group',
+        deliveryContext: {
+          channel: 'feishu',
+          to: 'chat:oc_group',
+          accountId: 'default',
+        },
+      },
+    });
+
+    const { route, source } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('session-store');
+    expect(route.sessionKey).toBe('agent:main:main');
+    expect(route.replyTo).toBe('user:ou_dm');
+  });
+
+  test('when the only external entry is a group, auto-scan returns default', async () => {
+    const sessionStorePath = writeStore({
+      'agent:main:feishu:group:oc_group': {
+        updatedAt: 9999,
+        chatType: 'group',
+        deliveryContext: {
+          channel: 'feishu',
+          to: 'chat:oc_group',
+          accountId: 'default',
+        },
+      },
+    });
+
+    const { route, source } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('default');
+    expect(route.sessionKey).toBe('main');
+  });
+
+  test('heartbeat entries with external deliveryContext are ignored', async () => {
+    const sessionStorePath = writeStore({
+      'agent:main:heartbeat': {
+        updatedAt: 9999,
+        deliveryContext: {
+          channel: 'feishu',
+          to: 'user:ou_dm',
+          accountId: 'default',
+        },
+      },
+    });
+
+    const { source } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('default');
+  });
+});
+
+describe('direct tiebreaker', () => {
+  test('most-recent DM wins regardless of key shape', async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-direct-tiebreaker-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 100,
+          chatType: 'direct',
+          deliveryContext: { channel: 'feishu', to: 'user:ou_older', accountId: 'default' },
+        },
+        'agent:main:feishu:direct:ou_newer': {
+          updatedAt: 500,
+          chatType: 'direct',
+          deliveryContext: { channel: 'feishu', to: 'user:ou_newer', accountId: 'default' },
+        },
+      }),
+      'utf-8'
+    );
+
+    const { route } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(route.replyTo).toBe('user:ou_newer');
+  });
+
+  test('channel-scoped DM beats legacy main DM when fresher', async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-direct-tiebreaker-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 500,
+          chatType: 'direct',
+          deliveryContext: { channel: 'feishu', to: 'user:ou_older', accountId: 'default' },
+        },
+        'agent:main:feishu:direct:ou_newer': {
+          updatedAt: 100,
+          chatType: 'direct',
+          deliveryContext: { channel: 'feishu', to: 'user:ou_newer', accountId: 'default' },
+        },
+      }),
+      'utf-8'
+    );
+
+    const { route } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(route.replyTo).toBe('user:ou_older');
+    expect(route.sessionKey).toBe('agent:main:main');
+  });
+});
+
+describe('CLI-overwritten main session fall-through', () => {
+  test('auto-scan returns default when main is non-external and only groups remain', async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-cli-overwrite-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 9000,
+          // CLI overwrote deliveryContext — no external channel anymore
+          deliveryContext: { channel: 'webchat' },
+        },
+        'agent:main:feishu:group:oc_group': {
+          updatedAt: 500,
+          chatType: 'group',
+          deliveryContext: {
+            channel: 'feishu',
+            to: 'chat:oc_group',
+            accountId: 'default',
+          },
+        },
+      }),
+      'utf-8'
+    );
+
+    const { source, route } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('default');
+    expect(route.sessionKey).toBe('main');
+  });
+
+  test('remembered DM route survives a main-session overwrite', async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-cli-overwrite-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 9000,
+          deliveryContext: { channel: 'webchat' },
+        },
+        'agent:main:feishu:group:oc_group': {
+          updatedAt: 500,
+          chatType: 'group',
+          deliveryContext: {
+            channel: 'feishu',
+            to: 'chat:oc_group',
+            accountId: 'default',
+          },
+        },
+      }),
+      'utf-8'
+    );
+
+    readStoredNotificationRouteMock.mockResolvedValue({
+      sessionKey: 'agent:main:main',
+      agentId: 'main',
+      replyChannel: 'feishu',
+      replyTo: 'user:ou_dm',
+      replyAccountId: 'default',
+      updatedAt: 0,
+    });
+
+    const { source, route } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('remembered');
+    expect(route.sessionKey).toBe('agent:main:main');
+    expect(route.replyTo).toBe('user:ou_dm');
   });
 });

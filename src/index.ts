@@ -531,16 +531,6 @@ function normalizeChannel(value: unknown): string | undefined {
   return readNonEmptyString(value)?.toLowerCase();
 }
 
-function isInternalAgentSessionKey(value: string | undefined): boolean {
-  const trimmed = readNonEmptyString(value);
-  if (!trimmed || trimmed === 'main') {
-    return true;
-  }
-
-  const parts = trimmed.split(':').filter((part) => part.length > 0);
-  return parts[0]?.toLowerCase() === 'agent' && parts[2]?.toLowerCase() === 'main';
-}
-
 async function resolveCurrentCommandRoute(
   ctx: CommandRouteContext,
   runtime: ServerRuntime,
@@ -592,7 +582,7 @@ async function buildHereText(
   logger: Logger
 ): Promise<string> {
   const route = await resolveCurrentCommandRoute(ctx, runtime, logger);
-  if (!route || route.sessionKey === 'main' || route.sessionKey.endsWith(':main')) {
+  if (!route || !route.replyChannel || !route.replyTo) {
     return [
       `Unable to resolve the current external session for server=${runtime.server.name}.`,
       'Run `/eigenflux here` inside the target conversation after OpenClaw has already created a session for it.',
@@ -623,7 +613,7 @@ async function rememberCurrentCommandRouteIfPossible(
   logger: Logger
 ): Promise<void> {
   const route = await resolveCurrentCommandRoute(ctx, runtime, logger);
-  if (!route || route.sessionKey === 'main' || route.sessionKey.endsWith(':main')) {
+  if (!route || !route.replyChannel || !route.replyTo) {
     return;
   }
 

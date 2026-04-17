@@ -454,4 +454,95 @@ describe('EigenFluxNotifier', () => {
       expect.objectContaining({ sessionKey: 'agent:main:feishu:group:oc_saved' })
     );
   });
+
+  test('persists a legacy agent:<id>:main DM route after delivery', async () => {
+    const runSpy = jest.fn().mockResolvedValue({ runId: 'run-1' });
+    const waitSpy = jest.fn().mockResolvedValue({ status: 'ok' });
+    const api = createApi({
+      runtime: {
+        subagent: { run: runSpy, waitForRun: waitSpy },
+      } as any,
+    });
+
+    const notifier = new EigenFluxNotifier(api, createLogger(), {
+      ...createConfig(),
+      sessionKey: 'agent:main:main',
+      replyChannel: 'feishu',
+      replyTo: 'user:ou_legacy',
+      replyAccountId: 'default',
+      openclawCliBin: 'openclaw',
+      routeOverrides: {
+        sessionKey: true,
+        agentId: true,
+        replyChannel: true,
+        replyTo: true,
+        replyAccountId: true,
+      },
+    } as any);
+
+    const ok = await notifier.deliver('hello');
+    expect(ok).toBe(true);
+    expect(writeStoredNotificationRouteMock).toHaveBeenCalled();
+    const savedRoute = writeStoredNotificationRouteMock.mock.calls[0][2];
+    expect(savedRoute.sessionKey).toBe('agent:main:main');
+    expect(savedRoute.replyTo).toBe('user:ou_legacy');
+  });
+
+  test('does NOT persist a route with an internal sessionKey (heartbeat)', async () => {
+    const runSpy = jest.fn().mockResolvedValue({ runId: 'run-2' });
+    const waitSpy = jest.fn().mockResolvedValue({ status: 'ok' });
+    const api = createApi({
+      runtime: {
+        subagent: { run: runSpy, waitForRun: waitSpy },
+      } as any,
+    });
+
+    const notifier = new EigenFluxNotifier(api, createLogger(), {
+      ...createConfig(),
+      sessionKey: 'agent:main:heartbeat',
+      replyChannel: 'feishu',
+      replyTo: 'user:ou_x',
+      replyAccountId: 'default',
+      openclawCliBin: 'openclaw',
+      routeOverrides: {
+        sessionKey: true,
+        agentId: true,
+        replyChannel: true,
+        replyTo: true,
+        replyAccountId: true,
+      },
+    } as any);
+
+    await notifier.deliver('hello');
+    expect(writeStoredNotificationRouteMock).not.toHaveBeenCalled();
+  });
+
+  test('does NOT persist a route missing replyChannel', async () => {
+    const runSpy = jest.fn().mockResolvedValue({ runId: 'run-3' });
+    const waitSpy = jest.fn().mockResolvedValue({ status: 'ok' });
+    const api = createApi({
+      runtime: {
+        subagent: { run: runSpy, waitForRun: waitSpy },
+      } as any,
+    });
+
+    const notifier = new EigenFluxNotifier(api, createLogger(), {
+      ...createConfig(),
+      sessionKey: 'agent:main:main',
+      replyChannel: undefined,
+      replyTo: undefined,
+      replyAccountId: undefined,
+      openclawCliBin: 'openclaw',
+      routeOverrides: {
+        sessionKey: true,
+        agentId: true,
+        replyChannel: true,
+        replyTo: true,
+        replyAccountId: true,
+      },
+    } as any);
+
+    await notifier.deliver('hello');
+    expect(writeStoredNotificationRouteMock).not.toHaveBeenCalled();
+  });
 });

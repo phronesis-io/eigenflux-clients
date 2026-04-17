@@ -366,6 +366,74 @@ describe('register unit', () => {
     await services[0].stop();
   });
 
+  test('succeeds for a legacy agent:<id>:main DM route', async () => {
+    const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
+    fs.mkdirSync(serverDir, { recursive: true });
+
+    // The harness mocks os.homedir() to homeDir (see the jest.mock at the top
+    // of this file), so listSessionStorePaths will scan homeDir/.openclaw/agents/*.
+    const sessionsRoot = path.join(homeDir, '.openclaw', 'agents', 'main', 'sessions');
+    fs.mkdirSync(sessionsRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(sessionsRoot, 'sessions.json'),
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: Date.now(),
+          chatType: 'direct',
+          deliveryContext: {
+            channel: 'feishu',
+            to: 'user:ou_legacy',
+            accountId: 'default',
+          },
+          origin: { provider: 'feishu', chatType: 'direct', to: 'user:ou_legacy' },
+          lastTo: 'user:ou_legacy',
+        },
+      }),
+      'utf-8'
+    );
+
+    discoverServersMock.mockResolvedValue({
+      kind: 'ok',
+      servers: [{ name: 'eigenflux', endpoint: 'http://127.0.0.1:18080', current: true }],
+    });
+
+    const { default: plugin } = await import('./index');
+    const services: any[] = [];
+    const commands: any[] = [];
+    plugin.register({
+      config: {},
+      pluginConfig: {
+        serverRouting: {
+          eigenflux: { agentId: 'main' },
+        },
+      },
+      runtime: {},
+      logger: createLogger(),
+      registerService: (service: any) => services.push(service),
+      registerCommand: (command: any) => commands.push(command),
+      registerHook: jest.fn(),
+      on: jest.fn(),
+    } as any);
+
+    await services[0].start();
+
+    const hereResp = await commands[0].handler({
+      args: 'here',
+      channel: 'feishu',
+      to: 'user:ou_legacy',
+      accountId: 'default',
+      getCurrentConversationBinding: jest.fn().mockResolvedValue({
+        channel: 'feishu',
+        accountId: 'default',
+        conversationId: 'user:ou_legacy',
+      }),
+    });
+
+    expect(hereResp.text).not.toContain('Unable to resolve');
+    expect(hereResp.text).toContain('sessionKey: agent:main:main');
+    expect(hereResp.text).toContain('target: user:ou_legacy');
+  });
+
   test('prefers runtime.subagent delivery when available', async () => {
     const serverDir = path.join(eigenfluxHome, 'servers', 'eigenflux');
     fs.mkdirSync(serverDir, { recursive: true });

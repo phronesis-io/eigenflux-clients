@@ -22,6 +22,7 @@ type SessionOriginLike = {
   provider?: unknown;
   to?: unknown;
   accountId?: unknown;
+  chatType?: unknown;
 };
 
 type SessionStoreEntry = {
@@ -30,6 +31,7 @@ type SessionStoreEntry = {
   lastTo?: unknown;
   lastAccountId?: unknown;
   origin?: SessionOriginLike;
+  chatType?: unknown;
 };
 
 type SessionStoreSnapshot = {
@@ -114,26 +116,91 @@ function isAnyRouteOverrideEnabled(overrides: NotificationRouteOverrides): boole
   return Object.values(overrides).some(Boolean);
 }
 
-function isInternalSessionKey(sessionKey: string): boolean {
+export function isInternalSessionKey(sessionKey: string): boolean {
   const trimmed = readNonEmptyString(sessionKey);
   if (!trimmed) {
     return true;
   }
-  if (trimmed === 'main') {
+  const lower = trimmed.toLowerCase();
+  if (lower === 'main' || lower === 'heartbeat') {
     return true;
   }
 
-  const parts = trimmed.split(':').filter((part) => part.length > 0);
-  return parts[0]?.toLowerCase() === 'agent' && parts[2]?.toLowerCase() === 'main';
+  const parts = lower.split(':').filter((part) => part.length > 0);
+  return parts[0] === 'agent' && parts[2] === 'heartbeat';
 }
 
 function isExternalChannel(channel: string | undefined): boolean {
   return Boolean(channel && !INTERNAL_CHANNELS.has(channel));
 }
 
-function isDirectSessionKey(sessionKey: string): boolean {
+export function isDirectSessionKey(sessionKey: string, entry: SessionStoreEntry): boolean {
   const parts = sessionKey.toLowerCase().split(':').filter(Boolean);
-  return parts.includes('direct') || parts.includes('dm');
+  if (parts.includes('direct') || parts.includes('dm')) {
+    return true;
+  }
+
+  const chatType =
+    readNonEmptyString(entry.chatType)?.toLowerCase() ??
+    readNonEmptyString(entry.origin?.chatType as unknown)?.toLowerCase();
+  if (chatType === 'direct' || chatType === 'dm') {
+    return true;
+  }
+
+  const toCandidates = [entry.deliveryContext?.to, entry.lastTo, entry.origin?.to];
+  return toCandidates.some((candidate) => {
+    const trimmed = readNonEmptyString(candidate);
+    if (!trimmed) {
+      return false;
+    }
+    const colonAt = trimmed.indexOf(':');
+    if (colonAt <= 0) {
+      return false;
+    }
+    return trimmed.slice(0, colonAt).toLowerCase() === 'user';
+  });
+}
+
+const GROUP_PEER_SHAPES = new Set(['group', 'channel', 'room']);
+const GROUP_TARGET_PREFIXES = new Set(['chat', 'channel', 'room']);
+
+function readChatTypeSignal(value: unknown): string | undefined {
+  const normalized = readNonEmptyString(value)?.toLowerCase();
+  return normalized && GROUP_PEER_SHAPES.has(normalized) ? normalized : undefined;
+}
+
+function readTargetPrefixSignal(value: unknown): string | undefined {
+  const trimmed = readNonEmptyString(value);
+  if (!trimmed) {
+    return undefined;
+  }
+  const colonAt = trimmed.indexOf(':');
+  if (colonAt <= 0) {
+    return undefined;
+  }
+  const prefix = trimmed.slice(0, colonAt).toLowerCase();
+  return GROUP_TARGET_PREFIXES.has(prefix) ? prefix : undefined;
+}
+
+export function isGroupEntry(sessionKey: string, entry: SessionStoreEntry): boolean {
+  const parts = sessionKey.toLowerCase().split(':').filter(Boolean);
+  if (parts.some((part) => GROUP_PEER_SHAPES.has(part))) {
+    return true;
+  }
+
+  if (
+    readChatTypeSignal(entry.chatType) ||
+    readChatTypeSignal(entry.origin?.chatType as unknown)
+  ) {
+    return true;
+  }
+
+  const toCandidates = [entry.deliveryContext?.to, entry.lastTo, entry.origin?.to];
+  if (toCandidates.some((candidate) => readTargetPrefixSignal(candidate))) {
+    return true;
+  }
+
+  return false;
 }
 
 function isSessionPeerShape(value: string | undefined): boolean {
@@ -481,20 +548,35 @@ type RouteCandidate = {
  *
  * Preference order (each tier only falls back if the prior tier is empty):
  *   1. External channel (not in INTERNAL_CHANNELS) over internal channel.
- *   2. Direct/DM session (sessionKey contains `direct`/`dm`) over non-direct.
+ *   2. Direct/DM session over non-direct.
  *   3. Most recent `updatedAt`.
+ *
+ * Always skips OpenClaw-internal sessions (bare `main`, `heartbeat`,
+ * `agent:*:heartbeat`). When called in auto-scan mode (no `preferred`),
+ * also skips group/channel/room entries so we never auto-post to a group —
+ * only an explicit binding (via `preferred`) can route there.
  */
 function selectBestRoute(
   snapshots: SessionStoreSnapshot[],
   preferred: PreferredRoute | undefined,
-  preferredAgentId?: string
+  preferredAgentId?: string,
+  logger?: Logger
 ): RouteSelection | undefined {
   const candidates: RouteCandidate[] = [];
+  const autoScan = preferred === undefined;
 
   for (const snapshot of snapshots) {
     const pathAgentId = tryDeriveAgentIdFromStorePath(snapshot.path);
     for (const [sessionKey, entry] of Object.entries(snapshot.store)) {
       if (sessionKey.includes(':subagent:')) {
+        continue;
+      }
+      if (isInternalSessionKey(sessionKey)) {
+        logger?.debug(`Skipping ${sessionKey}: internal session`);
+        continue;
+      }
+      if (autoScan && isGroupEntry(sessionKey, entry)) {
+        logger?.debug(`Skipping ${sessionKey}: group entry in auto-scan`);
         continue;
       }
 
@@ -511,7 +593,7 @@ function selectBestRoute(
         route,
         updatedAt: normalizeUpdatedAt(entry.updatedAt),
         isExternal: isExternalChannel(route.replyChannel),
-        isDirect: isDirectSessionKey(sessionKey),
+        isDirect: isDirectSessionKey(sessionKey, entry),
       });
     }
   }
@@ -555,7 +637,7 @@ export function findSessionRouteForBinding(
   }
 
   const snapshots = readSessionStores(options.sessionStorePath, agentId, logger);
-  const best = selectBestRoute(snapshots, { channel, to, accountId }, agentId);
+  const best = selectBestRoute(snapshots, { channel, to, accountId }, agentId, logger);
   if (best) {
     return best.route;
   }
@@ -647,7 +729,8 @@ export async function resolveNotificationRoute(
           to: configRoute.replyTo,
           accountId: configRoute.replyAccountId,
         },
-        undefined
+        undefined,
+        logger
       )?.route;
     }
     const resolved = enriched
@@ -683,7 +766,7 @@ export async function resolveNotificationRoute(
               accountId: remembered.replyAccountId,
             }
           : undefined;
-      const peerMatch = selectBestRoute(snapshots, preferred, undefined);
+      const peerMatch = selectBestRoute(snapshots, preferred, undefined, logger);
       if (peerMatch) {
         return { route: peerMatch.route, source: 'remembered' };
       }
@@ -706,7 +789,7 @@ export async function resolveNotificationRoute(
   }
 
   // 3. Scan recent conversation history.
-  const best = selectBestRoute(snapshots, undefined, undefined);
+  const best = selectBestRoute(snapshots, undefined, undefined, logger);
   if (best) {
     logger.info(
       `Route resolve from session store: session_key=${best.route.sessionKey}, agent_id=${best.route.agentId}, channel=${best.route.replyChannel ?? 'n/a'}, to=${best.route.replyTo ?? 'n/a'}, account=${best.route.replyAccountId ?? 'n/a'}, updated_at=${best.updatedAt}`
