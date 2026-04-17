@@ -319,3 +319,76 @@ describe('isInternalSessionKey', () => {
     expect(isInternalSessionKey('agent:main:discord:direct:user789')).toBe(false);
   });
 });
+
+import { isGroupEntry } from './notification-route-resolver';
+
+describe('isGroupEntry', () => {
+  test('sessionKey with :group: is a group', () => {
+    expect(isGroupEntry('agent:main:feishu:group:oc_123', {})).toBe(true);
+  });
+
+  test('sessionKey with :channel: is a group', () => {
+    expect(isGroupEntry('agent:main:discord:channel:c_123', {})).toBe(true);
+  });
+
+  test('sessionKey with :room: is a group', () => {
+    expect(isGroupEntry('agent:main:matrix:room:r_123', {})).toBe(true);
+  });
+
+  test('entry.chatType=group overrides DM-shaped key', () => {
+    expect(
+      isGroupEntry('agent:main:main', {
+        deliveryContext: { channel: 'feishu', to: 'user:ou_1' },
+        chatType: 'group' as any,
+      } as any)
+    ).toBe(true);
+  });
+
+  test('entry.origin.chatType=group', () => {
+    expect(
+      isGroupEntry('agent:main:main', {
+        origin: { provider: 'feishu', chatType: 'group' as any },
+      } as any)
+    ).toBe(true);
+  });
+
+  test('deliveryContext.to with chat: prefix is a group', () => {
+    expect(
+      isGroupEntry('agent:main:main', {
+        deliveryContext: { channel: 'feishu', to: 'chat:oc_123' },
+      } as any)
+    ).toBe(true);
+  });
+
+  test('lastTo with channel: prefix is a group', () => {
+    expect(
+      isGroupEntry('agent:main:main', { lastTo: 'channel:c_123' } as any)
+    ).toBe(true);
+  });
+
+  test('origin.to with room: prefix is a group', () => {
+    expect(
+      isGroupEntry('agent:main:main', { origin: { to: 'room:r_123' } } as any)
+    ).toBe(true);
+  });
+
+  test('DM session is NOT a group', () => {
+    expect(
+      isGroupEntry('agent:main:main', {
+        deliveryContext: { channel: 'feishu', to: 'user:ou_1' },
+      } as any)
+    ).toBe(false);
+  });
+
+  test('channel-scoped DM is NOT a group', () => {
+    expect(
+      isGroupEntry('agent:main:feishu:direct:ou_1', {
+        deliveryContext: { channel: 'feishu', to: 'user:ou_1' },
+      } as any)
+    ).toBe(false);
+  });
+
+  test('empty entry with plain DM-shaped key is NOT a group', () => {
+    expect(isGroupEntry('agent:main:main', {})).toBe(false);
+  });
+});

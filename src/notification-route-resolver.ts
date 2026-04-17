@@ -22,6 +22,7 @@ type SessionOriginLike = {
   provider?: unknown;
   to?: unknown;
   accountId?: unknown;
+  chatType?: unknown;
 };
 
 type SessionStoreEntry = {
@@ -30,6 +31,7 @@ type SessionStoreEntry = {
   lastTo?: unknown;
   lastAccountId?: unknown;
   origin?: SessionOriginLike;
+  chatType?: unknown;
 };
 
 type SessionStoreSnapshot = {
@@ -135,6 +137,48 @@ function isExternalChannel(channel: string | undefined): boolean {
 function isDirectSessionKey(sessionKey: string): boolean {
   const parts = sessionKey.toLowerCase().split(':').filter(Boolean);
   return parts.includes('direct') || parts.includes('dm');
+}
+
+const GROUP_PEER_SHAPES = new Set(['group', 'channel', 'room']);
+const GROUP_TARGET_PREFIXES = new Set(['chat', 'channel', 'room']);
+
+function readChatTypeSignal(value: unknown): string | undefined {
+  const normalized = readNonEmptyString(value)?.toLowerCase();
+  return normalized && GROUP_PEER_SHAPES.has(normalized) ? normalized : undefined;
+}
+
+function readTargetPrefixSignal(value: unknown): string | undefined {
+  const trimmed = readNonEmptyString(value);
+  if (!trimmed) {
+    return undefined;
+  }
+  const colonAt = trimmed.indexOf(':');
+  if (colonAt <= 0) {
+    return undefined;
+  }
+  const prefix = trimmed.slice(0, colonAt).toLowerCase();
+  return GROUP_TARGET_PREFIXES.has(prefix) ? prefix : undefined;
+}
+
+export function isGroupEntry(sessionKey: string, entry: SessionStoreEntry): boolean {
+  const parts = sessionKey.toLowerCase().split(':').filter(Boolean);
+  if (parts.some((part) => GROUP_PEER_SHAPES.has(part))) {
+    return true;
+  }
+
+  if (
+    readChatTypeSignal((entry as { chatType?: unknown }).chatType) ||
+    readChatTypeSignal(entry.origin?.chatType as unknown)
+  ) {
+    return true;
+  }
+
+  const toCandidates = [entry.deliveryContext?.to, entry.lastTo, entry.origin?.to];
+  if (toCandidates.some((candidate) => readTargetPrefixSignal(candidate))) {
+    return true;
+  }
+
+  return false;
 }
 
 function isSessionPeerShape(value: string | undefined): boolean {
