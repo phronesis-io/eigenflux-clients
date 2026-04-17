@@ -3,6 +3,7 @@ import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
 import { type NotificationRouteOverrides } from './config';
 import { Logger } from './logger';
 import {
+  isInternalSessionKey,
   resolveNotificationRoute,
   type NotificationRouteConfig,
   type NotificationRouteSource,
@@ -465,16 +466,6 @@ export class EigenFluxNotifier {
       .join(', ');
     this.logger.info(`Notification dispatched: ${details}`);
   }
-}
-
-function isInternalSessionKey(sessionKey: string): boolean {
-  const trimmed = sessionKey.trim();
-  if (!trimmed || trimmed === 'main') {
-    return true;
-  }
-
-  const parts = trimmed.split(':').filter((part) => part.length > 0);
-  return parts[0]?.toLowerCase() === 'agent' && parts[2]?.toLowerCase() === 'main';
 }
 
 function formatCommandFailure(result: {
