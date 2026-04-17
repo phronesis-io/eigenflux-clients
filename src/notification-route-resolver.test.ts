@@ -539,3 +539,74 @@ describe('auto-scan group exclusion', () => {
     expect(source).toBe('default');
   });
 });
+
+describe('direct tiebreaker', () => {
+  test('most-recent DM wins regardless of key shape', async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-direct-tiebreaker-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 100,
+          chatType: 'direct',
+          deliveryContext: { channel: 'feishu', to: 'user:ou_older', accountId: 'default' },
+        },
+        'agent:main:feishu:direct:ou_newer': {
+          updatedAt: 500,
+          chatType: 'direct',
+          deliveryContext: { channel: 'feishu', to: 'user:ou_newer', accountId: 'default' },
+        },
+      }),
+      'utf-8'
+    );
+
+    const { route } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(route.replyTo).toBe('user:ou_newer');
+  });
+
+  test('channel-scoped DM beats legacy main DM when fresher', async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-direct-tiebreaker-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 500,
+          chatType: 'direct',
+          deliveryContext: { channel: 'feishu', to: 'user:ou_older', accountId: 'default' },
+        },
+        'agent:main:feishu:direct:ou_newer': {
+          updatedAt: 100,
+          chatType: 'direct',
+          deliveryContext: { channel: 'feishu', to: 'user:ou_newer', accountId: 'default' },
+        },
+      }),
+      'utf-8'
+    );
+
+    const { route } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(route.replyTo).toBe('user:ou_older');
+    expect(route.sessionKey).toBe('agent:main:main');
+  });
+});
