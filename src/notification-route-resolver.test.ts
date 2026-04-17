@@ -610,3 +610,92 @@ describe('direct tiebreaker', () => {
     expect(route.sessionKey).toBe('agent:main:main');
   });
 });
+
+describe('CLI-overwritten main session fall-through', () => {
+  test('auto-scan returns default when main is non-external and only groups remain', async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-cli-overwrite-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 9000,
+          // CLI overwrote deliveryContext — no external channel anymore
+          deliveryContext: { channel: 'webchat' },
+        },
+        'agent:main:feishu:group:oc_group': {
+          updatedAt: 500,
+          chatType: 'group',
+          deliveryContext: {
+            channel: 'feishu',
+            to: 'chat:oc_group',
+            accountId: 'default',
+          },
+        },
+      }),
+      'utf-8'
+    );
+
+    const { source, route } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('default');
+    expect(route.sessionKey).toBe('main');
+  });
+
+  test('remembered DM route survives a main-session overwrite', async () => {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-cli-overwrite-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(
+      sessionStorePath,
+      JSON.stringify({
+        'agent:main:main': {
+          updatedAt: 9000,
+          deliveryContext: { channel: 'webchat' },
+        },
+        'agent:main:feishu:group:oc_group': {
+          updatedAt: 500,
+          chatType: 'group',
+          deliveryContext: {
+            channel: 'feishu',
+            to: 'chat:oc_group',
+            accountId: 'default',
+          },
+        },
+      }),
+      'utf-8'
+    );
+
+    readStoredNotificationRouteMock.mockResolvedValue({
+      sessionKey: 'agent:main:main',
+      agentId: 'main',
+      replyChannel: 'feishu',
+      replyTo: 'user:ou_dm',
+      replyAccountId: 'default',
+      updatedAt: 0,
+    });
+
+    const { source, route } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('remembered');
+    expect(route.sessionKey).toBe('agent:main:main');
+    expect(route.replyTo).toBe('user:ou_dm');
+  });
+});
