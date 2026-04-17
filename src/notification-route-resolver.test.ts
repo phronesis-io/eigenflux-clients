@@ -436,3 +436,106 @@ describe('isDirectSessionKey', () => {
     expect(isDirectSessionKey('agent:main:main', {})).toBe(false);
   });
 });
+
+describe('auto-scan group exclusion', () => {
+  function writeStore(entries: Record<string, unknown>): string {
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'eigenflux-group-exclusion-'));
+    const sessionStorePath = path.join(workdir, 'sessions.json');
+    fs.writeFileSync(sessionStorePath, JSON.stringify(entries), 'utf-8');
+    return sessionStorePath;
+  }
+
+  test('legacy agent:<id>:main DM wins over a more recent group', async () => {
+    const sessionStorePath = writeStore({
+      'agent:main:main': {
+        updatedAt: 1000,
+        chatType: 'direct',
+        deliveryContext: {
+          channel: 'feishu',
+          to: 'user:ou_dm',
+          accountId: 'default',
+        },
+        origin: { provider: 'feishu', chatType: 'direct' },
+        lastTo: 'user:ou_dm',
+      },
+      'agent:main:feishu:group:oc_group': {
+        updatedAt: 9999,
+        chatType: 'group',
+        deliveryContext: {
+          channel: 'feishu',
+          to: 'chat:oc_group',
+          accountId: 'default',
+        },
+      },
+    });
+
+    const { route, source } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('session-store');
+    expect(route.sessionKey).toBe('agent:main:main');
+    expect(route.replyTo).toBe('user:ou_dm');
+  });
+
+  test('when the only external entry is a group, auto-scan returns default', async () => {
+    const sessionStorePath = writeStore({
+      'agent:main:feishu:group:oc_group': {
+        updatedAt: 9999,
+        chatType: 'group',
+        deliveryContext: {
+          channel: 'feishu',
+          to: 'chat:oc_group',
+          accountId: 'default',
+        },
+      },
+    });
+
+    const { route, source } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('default');
+    expect(route.sessionKey).toBe('main');
+  });
+
+  test('heartbeat entries with external deliveryContext are ignored', async () => {
+    const sessionStorePath = writeStore({
+      'agent:main:heartbeat': {
+        updatedAt: 9999,
+        deliveryContext: {
+          channel: 'feishu',
+          to: 'user:ou_dm',
+          accountId: 'default',
+        },
+      },
+    });
+
+    const { source } = await resolveNotificationRoute(
+      {
+        sessionKey: 'main',
+        agentId: 'main',
+        sessionStorePath,
+        eigenfluxBin: 'eigenflux',
+        serverName: 'eigenflux',
+      },
+      createLogger()
+    );
+
+    expect(source).toBe('default');
+  });
+});

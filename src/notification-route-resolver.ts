@@ -548,8 +548,13 @@ type RouteCandidate = {
  *
  * Preference order (each tier only falls back if the prior tier is empty):
  *   1. External channel (not in INTERNAL_CHANNELS) over internal channel.
- *   2. Direct/DM session (sessionKey contains `direct`/`dm`) over non-direct.
+ *   2. Direct/DM session over non-direct.
  *   3. Most recent `updatedAt`.
+ *
+ * Always skips OpenClaw-internal sessions (bare `main`, `heartbeat`,
+ * `agent:*:heartbeat`). When called in auto-scan mode (no `preferred`),
+ * also skips group/channel/room entries so we never auto-post to a group —
+ * only an explicit binding (via `preferred`) can route there.
  */
 function selectBestRoute(
   snapshots: SessionStoreSnapshot[],
@@ -557,11 +562,18 @@ function selectBestRoute(
   preferredAgentId?: string
 ): RouteSelection | undefined {
   const candidates: RouteCandidate[] = [];
+  const autoScan = preferred === undefined;
 
   for (const snapshot of snapshots) {
     const pathAgentId = tryDeriveAgentIdFromStorePath(snapshot.path);
     for (const [sessionKey, entry] of Object.entries(snapshot.store)) {
       if (sessionKey.includes(':subagent:')) {
+        continue;
+      }
+      if (isInternalSessionKey(sessionKey)) {
+        continue;
+      }
+      if (autoScan && isGroupEntry(sessionKey, entry)) {
         continue;
       }
 
