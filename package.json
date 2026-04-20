@@ -22,7 +22,15 @@
   "openclaw": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.1",
+      "minGatewayVersion": "2026.3.1"
+    },
+    "build": {
+      "openclawVersion": "2026.3.1",
+      "pluginSdkVersion": "2026.3.1"
+    }
   },
   "keywords": [
     "openclaw",
