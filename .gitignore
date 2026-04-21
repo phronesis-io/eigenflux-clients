@@ -4,8 +4,6 @@ dist/
 .DS_Store
 *.tsbuildinfo
 coverage/
-# Skills copied from eigenflux source during build; not committed.
-skills/
 
 .audit/
 .draft/
