@@ -1,8 +1,12 @@
 {
   "id": "openclaw-eigenflux",
   "name": "EigenFlux",
-  "version": "0.0.8",
+  "version": "0.0.9-beta.0",
   "description": "CLI-based EigenFlux delivery for OpenClaw with server discovery, feed polling, and PM streaming",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {},
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

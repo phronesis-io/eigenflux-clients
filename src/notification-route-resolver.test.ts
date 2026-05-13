@@ -11,6 +11,11 @@ jest.mock('./session-route-memory', () => ({
 
 import { isInternalSessionKey, resolveNotificationRoute } from './notification-route-resolver';
 
+const runtimeStoreMock = {
+  get: jest.fn().mockResolvedValue(undefined),
+  set: jest.fn().mockResolvedValue(undefined),
+};
+
 function createLogger(): Logger {
   return new Logger({
     info: jest.fn(),
@@ -71,6 +76,7 @@ describe('resolveNotificationRoute', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
         routeOverrides: {
@@ -120,6 +126,7 @@ describe('resolveNotificationRoute', () => {
         agentId: 'main',
         replyChannel: 'feishu',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
         routeOverrides: {
@@ -158,6 +165,7 @@ describe('resolveNotificationRoute', () => {
       {
         sessionKey: 'main',
         agentId: 'main',
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
         routeOverrides: {
@@ -225,6 +233,7 @@ describe('resolveNotificationRoute', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
         routeOverrides: {
@@ -274,6 +283,7 @@ describe('resolveNotificationRoute', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
       },
@@ -474,6 +484,7 @@ describe('auto-scan group exclusion', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
       },
@@ -503,6 +514,7 @@ describe('auto-scan group exclusion', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
       },
@@ -530,6 +542,7 @@ describe('auto-scan group exclusion', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
       },
@@ -566,6 +579,7 @@ describe('direct tiebreaker', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
       },
@@ -600,6 +614,7 @@ describe('direct tiebreaker', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
       },
@@ -641,6 +656,7 @@ describe('CLI-overwritten main session fall-through', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
       },
@@ -688,6 +704,7 @@ describe('CLI-overwritten main session fall-through', () => {
         sessionKey: 'main',
         agentId: 'main',
         sessionStorePath,
+        store: runtimeStoreMock,
         eigenfluxBin: 'eigenflux',
         serverName: 'eigenflux',
       },

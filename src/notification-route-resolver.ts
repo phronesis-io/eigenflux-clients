@@ -4,7 +4,7 @@ import * as path from 'path';
 import { type NotificationRouteOverrides } from './config';
 import { Logger } from './logger';
 import { normalizeReplyTarget } from './reply-target';
-import { readStoredNotificationRoute } from './session-route-memory';
+import { readStoredNotificationRoute, type PluginRuntimeStore } from './session-route-memory';
 
 const INTERNAL_CHANNELS = new Set(['webchat']);
 
@@ -46,6 +46,7 @@ export type NotificationRouteConfig = {
   replyTo?: string;
   replyAccountId?: string;
   sessionStorePath?: string;
+  store?: PluginRuntimeStore;
   eigenfluxBin?: string;
   serverName?: string;
   routeOverrides?: NotificationRouteOverrides;
@@ -747,7 +748,7 @@ export async function resolveNotificationRoute(
   // 2. Remembered route (openclaw_deliver_session CLI config).
   if (options.ignoreRemembered !== true) {
     const remembered = await readStoredNotificationRoute(
-      config.eigenfluxBin,
+      config.store,
       config.serverName,
       logger
     );

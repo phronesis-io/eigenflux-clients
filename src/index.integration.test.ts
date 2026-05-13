@@ -13,6 +13,12 @@ jest.mock('os', () => {
   };
 });
 
+// Mock definePluginEntry from the SDK — the actual module is ESM-only and
+// cannot be loaded by Jest's CJS transform pipeline.
+jest.mock('openclaw/plugin-sdk/plugin-entry', () => ({
+  definePluginEntry: (opts: any) => opts,
+}));
+
 // Mock discoverServers and resolveEigenfluxHome
 const discoverServersMock = jest.fn();
 const resolveEigenfluxHomeMock = jest.fn();
@@ -134,6 +140,7 @@ describe('register integration', () => {
     const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-subagent-feed' });
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {
@@ -189,6 +196,7 @@ describe('register integration', () => {
     const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-dup-1' });
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {

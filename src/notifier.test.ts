@@ -29,7 +29,7 @@ function createApi(overrides: Partial<OpenClawPluginApi> = {}): OpenClawPluginAp
     source: '/tmp/eigenflux',
     config: {},
     pluginConfig: {},
-    runtime: {} as OpenClawPluginApi['runtime'],
+    runtime: {} as unknown as OpenClawPluginApi['runtime'],
     logger: {
       info: jest.fn(),
       warn: jest.fn(),
@@ -66,7 +66,7 @@ describe('EigenFluxNotifier', () => {
       createApi({
         runtime: {
           subagent: { run },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       createConfig()
@@ -91,7 +91,7 @@ describe('EigenFluxNotifier', () => {
         runtime: {
           subagent: { run, waitForRun },
           system: { runCommandWithTimeout },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       createConfig()
@@ -120,7 +120,7 @@ describe('EigenFluxNotifier', () => {
         runtime: {
           subagent: { run, waitForRun },
           system: { runCommandWithTimeout },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       createConfig()
@@ -144,7 +144,7 @@ describe('EigenFluxNotifier', () => {
       createApi({
         runtime: {
           system: { runCommandWithTimeout },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       createConfig()
@@ -179,7 +179,7 @@ describe('EigenFluxNotifier', () => {
             enqueueSystemEvent,
             requestHeartbeatNow,
           },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       createConfig()
@@ -236,7 +236,7 @@ describe('EigenFluxNotifier', () => {
       createApi({
         runtime: {
           subagent: { run },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       {
@@ -288,7 +288,7 @@ describe('EigenFluxNotifier', () => {
       createApi({
         runtime: {
           system: { runCommandWithTimeout },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       {
@@ -324,17 +324,18 @@ describe('EigenFluxNotifier', () => {
   });
 
   test('remembers the resolved route after a successful delivery', async () => {
+    const runtimeStoreMock = { get: jest.fn(), set: jest.fn() };
     const run = jest.fn().mockResolvedValue({ runId: 'run-subagent-memory' });
     const notifier = new EigenFluxNotifier(
       createApi({
         runtime: {
           subagent: { run },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       {
         ...createConfig(),
-        eigenfluxBin: 'eigenflux',
+        store: runtimeStoreMock,
         serverName: 'eigenflux',
       }
     );
@@ -342,8 +343,8 @@ describe('EigenFluxNotifier', () => {
     await expect(notifier.deliver('[EIGENFLUX_TEST] payload')).resolves.toBe(true);
 
     expect(writeStoredNotificationRouteMock).toHaveBeenCalledTimes(1);
-    const [bin, server, route] = writeStoredNotificationRouteMock.mock.calls[0];
-    expect(bin).toBe('eigenflux');
+    const [store, server, route] = writeStoredNotificationRouteMock.mock.calls[0];
+    expect(store).toBe(runtimeStoreMock);
     expect(server).toBe('eigenflux');
     expect(route).toMatchObject({
       sessionKey: 'agent:main:feishu:direct:ou_123',
@@ -389,7 +390,7 @@ describe('EigenFluxNotifier', () => {
       createApi({
         runtime: {
           subagent: { run },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       {
@@ -432,7 +433,7 @@ describe('EigenFluxNotifier', () => {
       createApi({
         runtime: {
           subagent: { run },
-        } as OpenClawPluginApi['runtime'],
+        } as unknown as OpenClawPluginApi['runtime'],
       }),
       createLogger(),
       {

@@ -10,7 +10,45 @@ import {
   type ResolvedNotificationRoute,
   type ResolvedNotificationRouteResult,
 } from './notification-route-resolver';
-import { writeStoredNotificationRoute } from './session-route-memory';
+import { writeStoredNotificationRoute, type PluginRuntimeStore } from './session-route-memory';
+
+/**
+ * Typed subset of the OpenClaw runtime API used by the notifier.
+ */
+type EigenFluxRuntimeApi = {
+  subagent?: {
+    run?: (params: {
+      sessionKey: string;
+      message: string;
+      deliver?: boolean;
+      idempotencyKey?: string;
+    }) => Promise<{ runId: string }>;
+    waitForRun?: (params: {
+      runId: string;
+      timeoutMs?: number;
+    }) => Promise<{ status: 'ok' | 'error' | 'timeout'; error?: string }>;
+  };
+  system?: {
+    enqueueSystemEvent?: (
+      text: string,
+      options: {
+        sessionKey: string;
+        deliveryContext?: {
+          channel?: string;
+          to?: string;
+          accountId?: string;
+        };
+      }
+    ) => boolean;
+    requestHeartbeatNow?: (options: {
+      reason?: string;
+      coalesceMs?: number;
+      agentId?: string;
+      sessionKey?: string;
+    }) => void;
+    runCommandWithTimeout?: CommandRunner;
+  };
+};
 
 const COMMAND_TIMEOUT_MS = 15000;
 // deliver: true runs the full agent loop (LLM + reply + channel send), which can
@@ -20,6 +58,7 @@ const SUBAGENT_WAIT_TIMEOUT_MS = 180_000;
 const HEARTBEAT_REASON = 'plugin:eigenflux';
 
 export type EigenFluxNotifierConfig = {
+  store?: PluginRuntimeStore;
   eigenfluxBin?: string;
   serverName?: string;
   sessionKey: string;
@@ -60,6 +99,10 @@ export class EigenFluxNotifier {
     this.api = api;
     this.logger = logger;
     this.config = config;
+  }
+
+  private get runtime(): EigenFluxRuntimeApi {
+    return (this.api.runtime ?? {}) as EigenFluxRuntimeApi;
   }
 
   async deliver(message: string): Promise<boolean> {
@@ -152,22 +195,7 @@ export class EigenFluxNotifier {
     message: string,
     route: ResolvedNotificationRoute
   ): Promise<NotifyAttemptResult> {
-    const runtimeSubagent = (this.api.runtime as
-      | {
-          subagent?: {
-            run?: (params: {
-              sessionKey: string;
-              message: string;
-              deliver?: boolean;
-              idempotencyKey?: string;
-            }) => Promise<{ runId: string }>;
-            waitForRun?: (params: {
-              runId: string;
-              timeoutMs?: number;
-            }) => Promise<{ status: 'ok' | 'error' | 'timeout'; error?: string }>;
-          };
-        }
-      | undefined)?.subagent;
+    const runtimeSubagent = this.runtime.subagent;
 
     if (!runtimeSubagent || typeof runtimeSubagent.run !== 'function') {
       return {
@@ -237,29 +265,7 @@ export class EigenFluxNotifier {
     message: string,
     route: ResolvedNotificationRoute
   ): Promise<NotifyAttemptResult> {
-    const runtimeSystem = (this.api.runtime as
-      | {
-          system?: {
-            enqueueSystemEvent?: (
-              text: string,
-              options: {
-                sessionKey: string;
-                deliveryContext?: {
-                  channel?: string;
-                  to?: string;
-                  accountId?: string;
-                };
-              }
-            ) => boolean;
-            requestHeartbeatNow?: (options: {
-              reason?: string;
-              coalesceMs?: number;
-              agentId?: string;
-              sessionKey?: string;
-            }) => void;
-          };
-        }
-      | undefined)?.system;
+    const runtimeSystem = this.runtime.system;
 
     if (
       !runtimeSystem ||
@@ -318,13 +324,7 @@ export class EigenFluxNotifier {
     argv: string[],
     route: ResolvedNotificationRoute
   ): Promise<NotifyAttemptResult> {
-    const runtimeCommand = (this.api.runtime as
-      | {
-          system?: {
-            runCommandWithTimeout?: CommandRunner;
-          };
-        }
-      | undefined)?.system?.runCommandWithTimeout;
+    const runtimeCommand = this.runtime.system?.runCommandWithTimeout;
 
     if (typeof runtimeCommand !== 'function') {
       return {
@@ -451,7 +451,7 @@ export class EigenFluxNotifier {
       return;
     }
     await writeStoredNotificationRoute(
-      this.config.eigenfluxBin,
+      this.config.store,
       this.config.serverName,
       route,
       this.logger

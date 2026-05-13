@@ -1,8 +1,12 @@
 import { Logger } from './logger';
 import { normalizeReplyTarget } from './reply-target';
-import { execEigenflux } from './cli-executor';
 
-export const DELIVER_SESSION_KEY = 'openclaw_deliver_session';
+export const DELIVER_SESSION_KEY_PREFIX = 'deliver_session';
+
+export type PluginRuntimeStore = {
+  get: (key: string) => Promise<unknown>;
+  set: (key: string, value: unknown) => Promise<void>;
+};
 
 export type StoredNotificationRoute = {
   sessionKey: string;
@@ -25,38 +29,39 @@ function normalizeChannel(value: unknown): string | undefined {
   return readNonEmptyString(value)?.toLowerCase();
 }
 
+function storeKey(serverName: string): string {
+  return `${DELIVER_SESSION_KEY_PREFIX}:${serverName}`;
+}
+
 /**
- * Reads the remembered delivery route for a server from the eigenflux CLI
- * config store (`openclaw_deliver_session` key). Returns undefined when the
- * key is unset or the CLI call fails.
+ * Reads the remembered delivery route for a server from the plugin runtime
+ * store (`deliver_session:<serverName>` key). Returns undefined when the
+ * key is unset or the store is unavailable.
  */
 export async function readStoredNotificationRoute(
-  eigenfluxBin: string | undefined,
+  store: PluginRuntimeStore | undefined,
   serverName: string | undefined,
   logger: Logger
 ): Promise<StoredNotificationRoute | undefined> {
-  const bin = readNonEmptyString(eigenfluxBin);
   const server = readNonEmptyString(serverName);
-  if (!bin || !server) {
+  if (!store || !server) {
     return undefined;
   }
 
-  const result = await execEigenflux<unknown>(
-    bin,
-    ['config', 'get', '--key', DELIVER_SESSION_KEY, '--server', server, '--format', 'json'],
-    { logger }
-  );
-
-  if (result.kind !== 'success' || result.data === undefined) {
-    if (result.kind === 'error') {
-      logger.debug(
-        `readStoredNotificationRoute: eigenflux config get failed for server=${server}: ${result.error.message}`
-      );
-    }
+  let parsed: unknown;
+  try {
+    parsed = await store.get(storeKey(server));
+  } catch (error) {
+    logger.debug(
+      `readStoredNotificationRoute: store.get failed for server=${server}: ${error instanceof Error ? error.message : String(error)}`
+    );
     return undefined;
   }
 
-  const parsed = result.data;
+  if (parsed === undefined || parsed === null) {
+    return undefined;
+  }
+
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return undefined;
   }
@@ -92,18 +97,17 @@ export async function readStoredNotificationRoute(
 }
 
 /**
- * Persists the remembered delivery route for a server via the eigenflux CLI
- * config store (`openclaw_deliver_session` key).
+ * Persists the remembered delivery route for a server via the plugin runtime
+ * store (`deliver_session:<serverName>` key).
  */
 export async function writeStoredNotificationRoute(
-  eigenfluxBin: string | undefined,
+  store: PluginRuntimeStore | undefined,
   serverName: string | undefined,
   route: Omit<StoredNotificationRoute, 'updatedAt'>,
   logger: Logger
 ): Promise<boolean> {
-  const bin = readNonEmptyString(eigenfluxBin);
   const server = readNonEmptyString(serverName);
-  if (!bin || !server) {
+  if (!store || !server) {
     return false;
   }
 
@@ -118,7 +122,7 @@ export async function writeStoredNotificationRoute(
     replyAccountId: readNonEmptyString(route.replyAccountId),
   };
 
-  const existing = await readStoredNotificationRoute(bin, server, logger);
+  const existing = await readStoredNotificationRoute(store, server, logger);
   if (
     existing &&
     existing.sessionKey === normalized.sessionKey &&
@@ -137,27 +141,12 @@ export async function writeStoredNotificationRoute(
     ...normalized,
     updatedAt: Date.now(),
   };
-  const value = JSON.stringify(payload);
 
-  const result = await execEigenflux<string>(
-    bin,
-    [
-      'config',
-      'set',
-      '--key',
-      DELIVER_SESSION_KEY,
-      '--value',
-      value,
-      '--server',
-      server,
-    ],
-    { logger, parseJson: false }
-  );
-
-  if (result.kind !== 'success') {
-    const detail = result.kind === 'error' ? result.error.message : result.kind;
+  try {
+    await store.set(storeKey(server), payload);
+  } catch (error) {
     logger.warn(
-      `Failed to persist remembered session route via eigenflux config set (server=${server}): ${detail}`
+      `Failed to persist remembered session route via store.set (server=${server}): ${error instanceof Error ? error.message : String(error)}`
     );
     return false;
   }

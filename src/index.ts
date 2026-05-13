@@ -1,4 +1,6 @@
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk';
+import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
+import type { PluginLogger } from 'openclaw/plugin-sdk/plugin-entry';
 
 import {
   EigenFluxPollingClient,
@@ -9,10 +11,9 @@ import {
 import { EigenFluxStreamClient, type PmStreamEvent } from './stream-client';
 import { execEigenflux } from './cli-executor';
 import { Logger } from './logger';
-import { AuthState, CredentialsLoader } from './credentials-loader';
+import { CredentialsLoader } from './credentials-loader';
 import {
   PLUGIN_CONFIG,
-  PLUGIN_CONFIG_SCHEMA,
   resolvePluginConfig,
   resolveEigenfluxHome,
   discoverServers,
@@ -30,7 +31,7 @@ import {
 } from './agent-prompt-templates';
 import { EigenFluxNotifier } from './notifier';
 import { normalizeReplyTarget } from './reply-target';
-import { writeStoredNotificationRoute } from './session-route-memory';
+import { writeStoredNotificationRoute, type PluginRuntimeStore } from './session-route-memory';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -94,11 +95,12 @@ const DEFAULT_ROUTING: RoutingConfig = {
   },
 };
 
-function register(api: OpenClawPluginApi): void {
+function registerPlugin(api: OpenClawPluginApi): void {
   const logger = new Logger(resolvePluginLogger(api));
 
   const pluginConfig = resolvePluginConfig(api.pluginConfig, logger);
   const eigenfluxHome = resolveEigenfluxHome();
+  const store = createInMemoryPluginStore();
 
   let runtimes: ServerRuntime[] = [];
   let notInstalledPromptDelivered = false;
@@ -116,7 +118,7 @@ function register(api: OpenClawPluginApi): void {
         );
         if (!notInstalledPromptDelivered) {
           notInstalledPromptDelivered = true;
-          await deliverNotInstalledPrompt(api, logger, pluginConfig, eigenfluxHome, discovery.bin);
+          await deliverNotInstalledPrompt(api, logger, pluginConfig, eigenfluxHome, discovery.bin, store);
         }
         return;
       }
@@ -130,7 +132,7 @@ function register(api: OpenClawPluginApi): void {
       logger.info(`Discovered ${servers.length} server(s): ${servers.map((s) => s.name).join(', ')}`);
 
       runtimes = servers.map((server) =>
-        createServerRuntime(api, logger, pluginConfig, server, eigenfluxHome)
+        createServerRuntime(api, logger, pluginConfig, server, eigenfluxHome, store)
       );
 
       for (const runtime of runtimes) {
@@ -156,6 +158,7 @@ function register(api: OpenClawPluginApi): void {
     logger,
     pluginConfig,
     eigenfluxHome,
+    store,
     () => runtimes,
     (next) => {
       runtimes = next;
@@ -163,7 +166,7 @@ function register(api: OpenClawPluginApi): void {
   );
 }
 
-function resolvePluginLogger(api: OpenClawPluginApi): unknown {
+function resolvePluginLogger(api: OpenClawPluginApi): PluginLogger {
   const runtimeLogging = (api.runtime as
     | {
         logging?: {
@@ -176,7 +179,7 @@ function resolvePluginLogger(api: OpenClawPluginApi): unknown {
     try {
       const child = runtimeLogging.getChildLogger({ plugin: 'eigenflux' });
       if (child) {
-        return child;
+        return child as PluginLogger;
       }
     } catch {
       // fall through to api.logger
@@ -185,15 +188,15 @@ function resolvePluginLogger(api: OpenClawPluginApi): unknown {
   return api.logger;
 }
 
-const plugin = {
+export default definePluginEntry({
   id: 'openclaw-eigenflux',
   name: 'EigenFlux',
   description: 'OpenClaw extension for EigenFlux with CLI-based feed polling and PM streaming',
-  configSchema: PLUGIN_CONFIG_SCHEMA,
-  register,
-};
-
-export default plugin;
+  register(api) {
+    if (api.registrationMode && api.registrationMode !== 'full') return;
+    registerPlugin(api);
+  },
+});
 
 const INSTALL_COMMAND = 'curl -fsSL https://eigenflux.ai/install.sh | bash';
 
@@ -202,7 +205,8 @@ async function deliverNotInstalledPrompt(
   logger: Logger,
   pluginConfig: ResolvedEigenFluxPluginConfig,
   _eigenfluxHome: string,
-  bin: string
+  bin: string,
+  store: PluginRuntimeStore
 ): Promise<void> {
   // Intentionally no workdir: the bootstrap notifier must not read or persist
   // any remembered session route under <eigenfluxHome>/bootstrap.
@@ -226,13 +230,15 @@ function createServerRuntime(
   logger: Logger,
   pluginConfig: ResolvedEigenFluxPluginConfig,
   server: DiscoveredServer,
-  eigenfluxHome: string
+  eigenfluxHome: string,
+  store: PluginRuntimeStore
 ): ServerRuntime {
   const routing = pluginConfig.serverRouting[server.name] ?? DEFAULT_ROUTING;
 
   const credentialsLoader = new CredentialsLoader(logger, eigenfluxHome, server.name);
 
   const notifier = new EigenFluxNotifier(api, logger, {
+    store,
     eigenfluxBin: pluginConfig.eigenfluxBin,
     serverName: server.name,
     sessionKey: routing.sessionKey,
@@ -255,7 +261,7 @@ function createServerRuntime(
     lastAuthPromptKey = null;
   };
 
-  const notifyAuthRequired = async (authEvent: AuthRequiredEvent): Promise<void> => {
+  const notifyAuthRequired = async (_authEvent: AuthRequiredEvent): Promise<void> => {
     const promptKey = `auth_required:${server.name}`;
     if (lastAuthPromptKey === promptKey) {
       logger.debug(`Skipping duplicate auth prompt for server=${server.name}`);
@@ -312,6 +318,7 @@ function registerCommand(
   logger: Logger,
   pluginConfig: ResolvedEigenFluxPluginConfig,
   eigenfluxHome: string,
+  store: PluginRuntimeStore,
   getRuntimes: () => ServerRuntime[],
   setRuntimes: (runtimes: ServerRuntime[]) => void
 ): void {
@@ -336,7 +343,7 @@ function registerCommand(
       return { runtimes: getRuntimes() };
     }
     const created = discovery.servers.map((server) =>
-      createServerRuntime(api, logger, pluginConfig, server, eigenfluxHome)
+      createServerRuntime(api, logger, pluginConfig, server, eigenfluxHome, store)
     );
     setRuntimes(created);
     return { runtimes: created };
@@ -390,7 +397,7 @@ function registerCommand(
       }
       const runtime = selection.runtime;
 
-      await rememberCurrentCommandRouteIfPossible(ctx, runtime, pluginConfig.eigenfluxBin, logger);
+      await rememberCurrentCommandRouteIfPossible(ctx, runtime, store, logger);
 
       switch (parsed.command) {
         case 'auth':
@@ -411,7 +418,7 @@ function registerCommand(
           };
         case 'here':
           return {
-            text: await buildHereText(ctx, runtime, pluginConfig.eigenfluxBin, logger),
+            text: await buildHereText(ctx, runtime, store, logger),
           };
         default:
           return {
@@ -578,7 +585,7 @@ async function resolveCurrentCommandRoute(
 async function buildHereText(
   ctx: CommandRouteContext,
   runtime: ServerRuntime,
-  eigenfluxBin: string,
+  store: PluginRuntimeStore,
   logger: Logger
 ): Promise<string> {
   const route = await resolveCurrentCommandRoute(ctx, runtime, logger);
@@ -589,7 +596,7 @@ async function buildHereText(
     ].join('\n');
   }
 
-  const saved = await writeStoredNotificationRoute(eigenfluxBin, runtime.server.name, route, logger);
+  const saved = await writeStoredNotificationRoute(store, runtime.server.name, route, logger);
   if (!saved) {
     return `Failed to persist the current EigenFlux route for server=${runtime.server.name}; check plugin logs for details.`;
   }
@@ -609,7 +616,7 @@ async function buildHereText(
 async function rememberCurrentCommandRouteIfPossible(
   ctx: CommandRouteContext,
   runtime: ServerRuntime,
-  eigenfluxBin: string,
+  store: PluginRuntimeStore,
   logger: Logger
 ): Promise<void> {
   const route = await resolveCurrentCommandRoute(ctx, runtime, logger);
@@ -617,7 +624,7 @@ async function rememberCurrentCommandRouteIfPossible(
     return;
   }
 
-  if (await writeStoredNotificationRoute(eigenfluxBin, runtime.server.name, route, logger)) {
+  if (await writeStoredNotificationRoute(store, runtime.server.name, route, logger)) {
     logger.debug(
       `Remembered current command route for server=${runtime.server.name}: session_key=${route.sessionKey}, channel=${route.replyChannel ?? 'unknown'}, to=${route.replyTo ?? 'unknown'}`
     );
@@ -724,6 +731,20 @@ function buildPmStatusText(runtime: ServerRuntime): string {
   }
 
   return lines.join('\n');
+}
+
+// ─── Plugin Runtime Store ───────────────────────────────────────────────────
+
+function createInMemoryPluginStore(): PluginRuntimeStore {
+  const data = new Map<string, unknown>();
+  return {
+    async get(key: string): Promise<unknown> {
+      return data.get(key);
+    },
+    async set(key: string, value: unknown): Promise<void> {
+      data.set(key, value);
+    },
+  };
 }
 
 // ─── Utilities ──────────────────────────────────────────────────────────────

@@ -13,6 +13,12 @@ jest.mock('os', () => {
   };
 });
 
+// Mock definePluginEntry from the SDK — the actual module is ESM-only and
+// cannot be loaded by Jest's CJS transform pipeline.
+jest.mock('openclaw/plugin-sdk/plugin-entry', () => ({
+  definePluginEntry: (opts: any) => opts,
+}));
+
 // Mock discoverServers and resolveEigenfluxHome from config
 const discoverServersMock = jest.fn();
 const resolveEigenfluxHomeMock = jest.fn();
@@ -31,6 +37,18 @@ const execEigenfluxMock = jest.fn();
 jest.mock('./cli-executor', () => ({
   execEigenflux: (...args: any[]) => execEigenfluxMock(...args),
 }));
+
+// Mock session-route-memory to intercept store reads/writes
+const readStoredNotificationRouteMock = jest.fn();
+const writeStoredNotificationRouteMock = jest.fn();
+jest.mock('./session-route-memory', () => {
+  const actual = jest.requireActual('./session-route-memory');
+  return {
+    ...actual,
+    readStoredNotificationRoute: (...args: any[]) => readStoredNotificationRouteMock(...args),
+    writeStoredNotificationRoute: (...args: any[]) => writeStoredNotificationRouteMock(...args),
+  };
+});
 
 // Mock EigenFluxStreamClient
 const streamClientStartMock = jest.fn().mockResolvedValue(undefined);
@@ -92,6 +110,10 @@ describe('register unit', () => {
     capturedPollOnFeedPolled = null;
     capturedPollOnAuthRequired = null;
 
+    // Reset session-route-memory mocks
+    readStoredNotificationRouteMock.mockReset().mockResolvedValue(undefined);
+    writeStoredNotificationRouteMock.mockReset().mockResolvedValue(true);
+
     // Default eigenflux CLI response so session-route-memory reads succeed (unset key).
     execEigenfluxMock.mockResolvedValue({ kind: 'success', data: undefined });
   });
@@ -122,6 +144,7 @@ describe('register unit', () => {
     const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-auth' });
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {
@@ -173,6 +196,7 @@ describe('register unit', () => {
     const commands: any[] = [];
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -223,6 +247,7 @@ describe('register unit', () => {
     const commands: any[] = [];
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -274,6 +299,7 @@ describe('register unit', () => {
     const commands: any[] = [];
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -305,6 +331,7 @@ describe('register unit', () => {
     const services: any[] = [];
     const commands: any[] = [];
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {
         serverRouting: {
@@ -344,24 +371,19 @@ describe('register unit', () => {
     );
     expect(hereResp.text).toContain('sessionKey: agent:mengtian:feishu:direct:ou_current');
 
-    // Persistence now happens via `eigenflux config set --key openclaw_deliver_session`
-    const configSetCall = execEigenfluxMock.mock.calls.find(([, args]: any[]) =>
-      Array.isArray(args) &&
-      args[0] === 'config' &&
-      args[1] === 'set' &&
-      args.includes('openclaw_deliver_session')
-    );
-    expect(configSetCall).toBeDefined();
-    const [, argv] = configSetCall!;
-    const valueIndex = argv.indexOf('--value') + 1;
-    const serverIndex = argv.indexOf('--server') + 1;
-    expect(argv[serverIndex]).toBe('eigenflux');
-    const remembered = JSON.parse(argv[valueIndex]) as Record<string, unknown>;
-    expect(remembered.sessionKey).toBe('agent:mengtian:feishu:direct:ou_current');
-    expect(remembered.agentId).toBe('mengtian');
-    expect(remembered.replyChannel).toBe('feishu');
-    expect(remembered.replyTo).toBe('user:ou_current');
-    expect(remembered.replyAccountId).toBe('default');
+    // Persistence now happens via the runtime store (writeStoredNotificationRoute)
+    expect(writeStoredNotificationRouteMock).toHaveBeenCalled();
+    const [, serverName, route] = writeStoredNotificationRouteMock.mock.calls.find(
+      ([, server]: any[]) => server === 'eigenflux'
+    )!;
+    expect(serverName).toBe('eigenflux');
+    expect(route).toMatchObject({
+      sessionKey: 'agent:mengtian:feishu:direct:ou_current',
+      agentId: 'mengtian',
+      replyChannel: 'feishu',
+      replyTo: 'user:ou_current',
+      replyAccountId: 'default',
+    });
 
     await services[0].stop();
   });
@@ -401,6 +423,7 @@ describe('register unit', () => {
     const services: any[] = [];
     const commands: any[] = [];
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {
         serverRouting: {
@@ -453,6 +476,7 @@ describe('register unit', () => {
     const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-subagent' });
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {
@@ -492,6 +516,7 @@ describe('register unit', () => {
     const services: any[] = [];
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -532,6 +557,7 @@ describe('register unit', () => {
     const services: any[] = [];
     const commands: any[] = [];
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -571,6 +597,7 @@ describe('register unit', () => {
     const commands: any[] = [];
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -602,6 +629,7 @@ describe('register unit', () => {
     const subagentRun = jest.fn().mockResolvedValue({ runId: 'run-install' });
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {
@@ -654,6 +682,7 @@ describe('register unit', () => {
     const commands: any[] = [];
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -680,6 +709,7 @@ describe('register unit', () => {
     const commands: any[] = [];
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -716,6 +746,7 @@ describe('register unit', () => {
     const commands: any[] = [];
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -760,6 +791,7 @@ describe('register unit', () => {
     const commands: any[] = [];
 
     plugin.register({
+      registrationMode: 'full',
       config: {},
       pluginConfig: {},
       runtime: {},
@@ -774,5 +806,26 @@ describe('register unit', () => {
     const authResp = await commands[0].handler({ args: 'auth' });
     expect(authResp.text).toContain('EigenFlux auth status (server=eigenflux):');
     expect(authResp.text).toContain('status: available');
+  });
+
+  test('skips registration when registrationMode is not full', async () => {
+    const { default: plugin } = await import('./index');
+    const services: any[] = [];
+    const commands: any[] = [];
+
+    plugin.register({
+      registrationMode: 'discovery',
+      config: {},
+      pluginConfig: {},
+      runtime: {},
+      logger: createLogger(),
+      registerService: (service: any) => services.push(service),
+      registerCommand: (command: any) => commands.push(command),
+      registerHook: jest.fn(),
+      on: jest.fn(),
+    } as any);
+
+    expect(services).toHaveLength(0);
+    expect(commands).toHaveLength(0);
   });
 });

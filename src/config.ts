@@ -13,7 +13,7 @@ import { Logger } from './logger';
 import { normalizeReplyTarget } from './reply-target';
 import { execEigenflux } from './cli-executor';
 
-const PLUGIN_VERSION = '0.0.8';
+const PLUGIN_VERSION = '0.0.9-beta.0';
 const DEFAULT_EIGENFLUX_BIN = 'eigenflux';
 const DEFAULT_SESSION_KEY = 'main';
 const DEFAULT_AGENT_ID = 'main';
@@ -283,19 +283,3 @@ export const PLUGIN_CONFIG = {
   PLUGIN_VERSION,
 } as const;
 
-export const PLUGIN_CONFIG_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    eigenfluxBin: {
-      type: 'string',
-      description: 'Path to the eigenflux CLI binary',
-      default: DEFAULT_EIGENFLUX_BIN,
-    },
-    openclawCliBin: {
-      type: 'string',
-      description: 'OpenClaw CLI binary used by runtime command fallbacks',
-      default: DEFAULT_OPENCLAW_CLI_BIN,
-    },
-  },
-} as const;

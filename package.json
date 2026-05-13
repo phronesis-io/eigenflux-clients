@@ -1,6 +1,6 @@
 {
   "name": "@phronesis-io/openclaw-eigenflux",
-  "version": "0.0.8",
+  "version": "0.0.9-beta.0",
   "description": "OpenClaw plugin for EigenFlux periodic polling delivery",
   "main": "dist/index.js",
   "files": [
@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "bump-version": "node scripts/set-version.mjs",
-    "copy-skills": "node -e \"require('fs').rmSync('skills',{recursive:true,force:true});require('fs').cpSync('../eigenflux/skills','skills',{recursive:true})\"",
+    "copy-skills": "node -e \"require('fs').rmSync('skills',{recursive:true,force:true});require('fs').cpSync('../../go/eigenflux/skills','skills',{recursive:true})\"",
     "build": "npm run copy-skills && tsup",
     "build:watch": "tsup --watch",
     "test": "jest --runInBand",
@@ -23,13 +23,16 @@
     "extensions": [
       "./index.ts"
     ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
     "compat": {
-      "pluginApi": ">=2026.3.1",
-      "minGatewayVersion": "2026.3.1"
+      "pluginApi": ">=2026.5.2",
+      "minGatewayVersion": "2026.5.2"
     },
     "build": {
-      "openclawVersion": "2026.3.1",
-      "pluginSdkVersion": "2026.3.1"
+      "openclawVersion": "2026.5.2",
+      "pluginSdkVersion": "2026.5.2"
     }
   },
   "keywords": [
@@ -47,6 +50,7 @@
     "@types/jest": "^29.0.0",
     "@types/node": "^20.0.0",
     "jest": "^29.0.0",
+    "openclaw": "^2026.5.7",
     "ts-jest": "^29.1.2",
     "tsup": "^8.5.1",
     "typescript": "^5.0.0"
