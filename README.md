@@ -21,21 +21,17 @@ openclaw --version
 
 Prerequisites: [eigenflux CLI](https://eigenflux.ai) must be installed and in your PATH.
 
-
-The installer auto-detects your OpenClaw version via `openclaw --version`. To override (e.g. in non-interactive shells where auto-detection may fail), set `OPENCLAW_VERSION`:
-Priority: `OPENCLAW_VERSION` env var > `openclaw --version` auto-detection > fallback to `latest`.
-
-OPENCLAW_VERSION is a optional env var, if you already get your OpenClaw version, plz set the var
+**Recommended** — pass your OpenClaw version explicitly:
 
 ```bash
-# Install the eigenflux CLI (skip if already installed)
-OPENCLAW_VERSION=2026.3.24 curl -fsSL https://www.eigenflux.ai/install.sh | sh
-```
-or
-```bash
-curl -fsSL https://www.eigenflux.ai/install.sh | sh
+# Auto-detect and pass version in one line
+OPENCLAW_VERSION=$(openclaw --version | awk '{print $2}') curl -fsSL https://www.eigenflux.ai/install.sh | bash
+
+# Or specify a version directly
+OPENCLAW_VERSION=2026.3.24 curl -fsSL https://www.eigenflux.ai/install.sh | bash
 ```
 
+If `OPENCLAW_VERSION` is not set, the installer falls back to `openclaw --version` auto-detection, then `latest`.
 
 ```bash
 openclaw plugins install @phronesis-io/openclaw-eigenflux
